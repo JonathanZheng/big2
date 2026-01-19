@@ -65,6 +65,30 @@ def parse_move_input(input_str: str, hand: List[int]) -> Optional[List[int]]:
     return sorted(cards)
 
 
+def format_ai_hand(cards: List[int], max_display: int = 10) -> str:
+    """Format AI hand compactly."""
+    if len(cards) <= max_display:
+        return cards_to_str(cards)
+    else:
+        visible = sorted(cards)[:max_display]
+        remaining = len(cards) - max_display
+        return f"{cards_to_str(visible)} ... and {remaining} more"
+
+
+def parse_move_number(input_str: str, num_moves: int) -> Optional[int]:
+    """Parse move number input (1-based), return 0-based index or None."""
+    try:
+        num = int(input_str)
+        if 1 <= num <= num_moves:
+            return num - 1  # Convert to 0-based
+        else:
+            print(f"Invalid move number. Please enter 1-{num_moves}.")
+            return None
+    except ValueError:
+        print(f"Invalid input. Please enter a number between 1 and {num_moves}.")
+        return None
+
+
 def display_hand(hand: List[int]):
     """Display player's hand in readable format."""
     print("\nYour hand:")
@@ -152,7 +176,8 @@ def display_game_state(game: Big2Game, human_player: int):
             print(f"Player {i} (YOU): {len(game.hands[i])} cards")
         else:
             marker = " ←" if i == game.current_player else ""
-            print(f"Player {i} (AI): {len(game.hands[i])} cards{marker}")
+            hand_str = format_ai_hand(game.hands[i])
+            print(f"Player {i} (AI): {hand_str}{marker}")
 
     # Show last move
     if game.last_move and not game.last_move.is_pass():
@@ -197,16 +222,15 @@ def play_interactive_game(model_path: str, human_player: int = 0):
 
             legal_moves = get_legal_moves(game, human_player)
 
+            # Always display legal moves
+            display_legal_moves(legal_moves)
+
             # Get move from user
             while True:
-                print("\nEnter your move:")
-                print("  - Type card names (e.g., '3d 4d 5d')")
-                print("  - Type 'pass' to pass")
-                print("  - Type 'help' to see legal moves")
-                print("  - Type 'quit' to exit")
+                print(f"\nEnter move number (1-{len(legal_moves)}) or 'quit': ", end="")
 
                 try:
-                    user_input = input("> ").strip().lower()
+                    user_input = input().strip().lower()
                 except EOFError:
                     print("\nGame quit.")
                     return
@@ -215,32 +239,13 @@ def play_interactive_game(model_path: str, human_player: int = 0):
                     print("Game quit.")
                     return
 
-                if user_input == 'help':
-                    display_legal_moves(legal_moves)
+                # Parse move number
+                move_idx = parse_move_number(user_input, len(legal_moves))
+                if move_idx is None:
                     continue
 
-                # Parse move
-                cards = parse_move_input(user_input, game.hands[human_player])
-                if cards is None:
-                    print("Invalid input. Try again.")
-                    continue
-
-                # Create move
-                move = Move(cards, human_player)
-
-                # Validate move
-                valid = False
-                for legal_move in legal_moves:
-                    if sorted(legal_move.cards) == sorted(move.cards):
-                        valid = True
-                        move = legal_move
-                        break
-
-                if not valid:
-                    print("That move is not legal. Type 'help' to see legal moves.")
-                    continue
-
-                # Execute move
+                # Get the selected move
+                move = legal_moves[move_idx]
                 break
 
             # Display what human played
@@ -263,12 +268,6 @@ def play_interactive_game(model_path: str, human_player: int = 0):
                 print(f"\nPlayer {current} (AI) played: {cards_to_str(move.cards)}")
                 move_type = detect_move_type(move.cards)
                 print(f"  Type: {move_type.name}")
-
-            try:
-                input("Press Enter to continue...")
-            except EOFError:
-                print("\nGame quit.")
-                return
 
         # Step game
         _, _, done, info = game.step(move)

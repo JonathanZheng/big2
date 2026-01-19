@@ -17,6 +17,7 @@ from ..env import Big2Game, encode_state, encode_action, get_legal_moves
 from ..models import SimpleNetwork
 from ..config import TRAINING_CONFIG, NETWORK_CONFIG
 from .buffer import ReplayBuffer
+from ..agents import select_action_greedy_bot
 
 
 def select_action(
@@ -160,6 +161,45 @@ def evaluate_vs_random(
                 action_idx = random.randrange(len(legal_moves))
 
             move = legal_moves[action_idx]
+            _, _, done, info = game.step(move)
+
+        if info["winner"] == 0:
+            wins += 1
+
+    return wins / num_games
+
+
+def evaluate_vs_greedy_bot(
+    model: SimpleNetwork,
+    num_games: int,
+    device: str
+) -> float:
+    """
+    Evaluate model against greedy bot opponents.
+
+    Args:
+        model: Policy network
+        num_games: Number of games to play
+        device: Device to run model on
+
+    Returns:
+        Win rate (0.0 to 1.0)
+    """
+    wins = 0
+    for _ in range(num_games):
+        game = Big2Game()
+
+        while not game.done:
+            player = game.current_player
+
+            if player == 0:
+                # Model plays as player 0
+                action_idx, legal_moves = select_action(game, player, model, epsilon=0.0, device=device)
+                move = legal_moves[action_idx]
+            else:
+                # Greedy bot opponents
+                move = select_action_greedy_bot(game, player)
+
             _, _, done, info = game.step(move)
 
         if info["winner"] == 0:
@@ -366,7 +406,13 @@ def train(
             # Evaluation
             if episode > 0 and episode % config["eval_freq"] == 0:
                 eval_start = time.time()
-                win_rate = evaluate_vs_random(model, config["eval_games"], device)
+
+                # Evaluate vs random opponents
+                win_rate_random = evaluate_vs_random(model, config["eval_games"], device)
+
+                # Evaluate vs greedy bot opponents
+                win_rate_greedy = evaluate_vs_greedy_bot(model, config["eval_games"], device)
+
                 eval_time = time.time() - eval_start
 
                 # Logging
@@ -374,14 +420,15 @@ def train(
                 episodes_per_sec = num_workers / episode_time if num_workers > 0 else 1.0 / episode_time
                 print(f"Episode {episode:6d} | "
                       f"ε={epsilon:.3f} | "
-                      f"Win%={win_rate*100:5.1f} | "
+                      f"WinRand={win_rate_random*100:5.1f}% | "
+                      f"WinGreedy={win_rate_greedy*100:5.1f}% | "
                       f"Loss={loss_value:.4f} | "
                       f"Buffer={len(buffer):5d} | "
                       f"Eps/s={episodes_per_sec:.1f}")
 
-                # Save best model
-                if checkpoint_path and win_rate > best_win_rate:
-                    best_win_rate = win_rate
+                # Save best model (based on greedy bot win rate)
+                if checkpoint_path and win_rate_greedy > best_win_rate:
+                    best_win_rate = win_rate_greedy
                     best_path = checkpoint_path.replace(".pt", "_best.pt")
                     torch.save({
                         "episode": episode,
@@ -389,10 +436,11 @@ def train(
                         "target_model_state_dict": target_model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
                         "epsilon": epsilon,
-                        "win_rate": win_rate,
+                        "win_rate_random": win_rate_random,
+                        "win_rate_greedy": win_rate_greedy,
                         "best_win_rate": best_win_rate,
                     }, best_path)
-                    print(f"  → Saved best model (win rate: {win_rate*100:.1f}%)")
+                    print(f"  → Saved best model (greedy win rate: {win_rate_greedy*100:.1f}%, random win rate: {win_rate_random*100:.1f}%)")
 
             # Save checkpoint
             if checkpoint_path and episode > 0 and episode % config["save_freq"] == 0:
