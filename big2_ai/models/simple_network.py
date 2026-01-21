@@ -8,21 +8,23 @@ from typing import Tuple
 
 class SimpleNetwork(nn.Module):
     """
-    Simple dense network for Q-value estimation.
+    Simple dense network for Q-value estimation (Stage 2 - deeper MLP).
 
     Architecture:
-        Input: state (143) + action (52) = 195 dims
+        Input: state (149) + action (52) = 201 dims
         ↓
-        Linear(195 → 256) + ReLU
+        Linear(201 → 256) + ReLU
+        ↓
+        Linear(256 → 256) + ReLU
         ↓
         Linear(256 → 256) + ReLU
         ↓
-        Linear(256 → 256) + ReLU
+        Linear(256 → 256) + ReLU  # NEW (4th hidden layer)
         ↓
         Linear(256 → 1)  # Q-value
     """
 
-    def __init__(self, state_dim: int = 143, action_dim: int = 52, hidden_dim: int = 256):
+    def __init__(self, state_dim: int = 149, action_dim: int = 52, hidden_dim: int = 256, **kwargs):
         """
         Initialize network.
 
@@ -30,6 +32,7 @@ class SimpleNetwork(nn.Module):
             state_dim: Dimension of state encoding
             action_dim: Dimension of action encoding
             hidden_dim: Hidden layer dimension
+            **kwargs: Additional arguments (ignored, for compatibility)
         """
         super().__init__()
 
@@ -37,11 +40,12 @@ class SimpleNetwork(nn.Module):
         self.action_dim = action_dim
         self.input_dim = state_dim + action_dim
 
-        # Network layers
+        # Network layers (4 hidden layers)
         self.fc1 = nn.Linear(self.input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, 1)
+        self.fc4 = nn.Linear(hidden_dim, hidden_dim)  # NEW (4th hidden layer)
+        self.fc5 = nn.Linear(hidden_dim, 1)           # Output (was fc4)
 
         # Initialize weights
         self._init_weights()
@@ -66,7 +70,8 @@ class SimpleNetwork(nn.Module):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
-        x = self.fc4(x)
+        x = F.relu(self.fc4(x))  # NEW (4th hidden layer)
+        x = self.fc5(x)           # Output (was fc4)
         return x
 
     def predict_q_values(self, states: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
@@ -86,8 +91,8 @@ class SimpleNetwork(nn.Module):
 
 
 def test_network():
-    """Test network forward pass."""
-    print("Testing SimpleNetwork...")
+    """Test network forward pass (Stage 2 - deeper MLP)."""
+    print("Testing SimpleNetwork (Stage 2)...")
 
     # Create network
     net = SimpleNetwork()
@@ -97,7 +102,7 @@ def test_network():
 
     # Test forward pass
     batch_size = 32
-    state_dim = 143
+    state_dim = 149  # Stage 2 state dimension
     action_dim = 52
 
     states = torch.randn(batch_size, state_dim)
