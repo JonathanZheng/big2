@@ -35,10 +35,10 @@ export function PlayerHand({
   };
 
   const cardOverlap = {
-    bottom: '-ml-8 first:ml-0',
-    top: '-ml-8 first:ml-0',
-    left: '-mt-12 first:mt-0',
-    right: '-mt-12 first:mt-0',
+    bottom: '-ml-3 first:ml-0',
+    top: '-ml-6 first:ml-0',
+    left: '-mt-10 first:mt-0',
+    right: '-mt-10 first:mt-0',
   };
 
   return (

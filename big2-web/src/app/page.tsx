@@ -1,11 +1,40 @@
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { createClient } from '@/lib/supabase/server';
 
-export default function Home() {
+export default async function Home() {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-green-900 to-green-950 flex flex-col items-center justify-center p-8">
-      <div className="max-w-4xl w-full">
+    <div className="min-h-screen bg-gradient-to-b from-green-900 to-green-950 flex flex-col p-8">
+      {/* Header */}
+      <header className="flex justify-end mb-8">
+        {user ? (
+          <Link href="/profile">
+            <Button variant="outline" className="border-green-400 text-green-100 hover:bg-green-800">
+              Profile
+            </Button>
+          </Link>
+        ) : (
+          <div className="flex gap-2">
+            <Link href="/auth/login">
+              <Button variant="outline" className="border-green-400 text-green-100 hover:bg-green-800">
+                Login
+              </Button>
+            </Link>
+            <Link href="/auth/signup">
+              <Button className="bg-green-600 hover:bg-green-500">
+                Sign Up
+              </Button>
+            </Link>
+          </div>
+        )}
+      </header>
+
+      <div className="flex-1 flex flex-col items-center justify-center">
+        <div className="max-w-4xl w-full">
         <div className="text-center mb-12">
           <h1 className="text-6xl font-bold text-white mb-4">Big 2</h1>
           <p className="text-xl text-green-200">The classic Chinese card game</p>
@@ -84,6 +113,7 @@ export default function Home() {
 
         <div className="mt-12 text-center text-green-300/60 text-sm">
           <p>Big 2 (锄大地) is a popular card game in East Asia</p>
+        </div>
         </div>
       </div>
     </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { PlayerHand } from './PlayerHand';
 import { PlayArea, SelectedCardsPreview } from './PlayArea';
@@ -29,6 +29,8 @@ export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd }: GameB
   const [selectedCards, setSelectedCards] = useState<number[]>([]);
   const [gamePhase, setGamePhase] = useState<GamePhase>('playing');
   const [isProcessingBotTurn, setIsProcessingBotTurn] = useState(false);
+  const [gameVersion, setGameVersion] = useState(0);
+  const botTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Initialize game
   useEffect(() => {
@@ -38,29 +40,43 @@ export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd }: GameB
 
   // Handle bot turns
   useEffect(() => {
-    if (!game || gamePhase === 'ended' || isProcessingBotTurn) return;
+    // Skip if no game, game ended, or timer already running
+    if (!game || gamePhase === 'ended' || botTimerRef.current) return;
 
     const currentPlayer = game.getCurrentPlayer();
     if (currentPlayer === humanPlayer) return;
 
-    // Bot turn
+    // Bot turn - start timer
     setIsProcessingBotTurn(true);
 
-    const timer = setTimeout(() => {
-      const botMove = selectActionGreedyBot(game, currentPlayer);
-      game.step(botMove);
+    botTimerRef.current = setTimeout(() => {
+      try {
+        const botMove = selectActionGreedyBot(game, currentPlayer);
+        game.step(botMove);
 
-      if (game.isDone()) {
-        setGamePhase('ended');
-        onGameEnd?.(game.getWinner()!);
+        if (game.isDone()) {
+          setGamePhase('ended');
+          onGameEnd?.(game.getWinner()!);
+        }
+
+        setGame(game);
+        setGameVersion(v => v + 1);
+      } catch (error) {
+        console.error('Bot error:', error);
+      } finally {
+        botTimerRef.current = null;
+        setIsProcessingBotTurn(false);
       }
-
-      setGame(game);
-      setIsProcessingBotTurn(false);
     }, botDelay);
 
-    return () => clearTimeout(timer);
-  }, [game, humanPlayer, botDelay, gamePhase, isProcessingBotTurn, onGameEnd]);
+    // Cleanup only on unmount
+    return () => {
+      if (botTimerRef.current) {
+        clearTimeout(botTimerRef.current);
+        botTimerRef.current = null;
+      }
+    };
+  }, [game, humanPlayer, botDelay, gamePhase, onGameEnd, gameVersion]);
 
   const handleCardClick = useCallback((card: number) => {
     setSelectedCards((prev) =>
@@ -81,6 +97,7 @@ export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd }: GameB
 
     setSelectedCards([]);
     setGame(game);
+    setGameVersion(v => v + 1);
   }, [game, selectedCards, humanPlayer, onGameEnd]);
 
   const handlePass = useCallback(() => {
@@ -91,6 +108,7 @@ export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd }: GameB
 
     setSelectedCards([]);
     setGame(game);
+    setGameVersion(v => v + 1);
   }, [game, humanPlayer]);
 
   const handleClear = useCallback(() => {
@@ -98,11 +116,16 @@ export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd }: GameB
   }, []);
 
   const handleNewGame = useCallback(() => {
+    if (botTimerRef.current) {
+      clearTimeout(botTimerRef.current);
+      botTimerRef.current = null;
+    }
     const newGame = createGame();
     setGame(newGame);
     setSelectedCards([]);
     setGamePhase('playing');
     setIsProcessingBotTurn(false);
+    setGameVersion(0);
   }, []);
 
   if (!game) {
