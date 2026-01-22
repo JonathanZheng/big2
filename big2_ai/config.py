@@ -17,7 +17,7 @@ TRAINING_CONFIG = {
 
     # Exploration - Flexible epsilon schedule
     "epsilon_start": 0.9,
-    "epsilon_end": 0.05,  # Maintain some exploration
+    "epsilon_end": 0.01,  # Maintain some exploration
     "epsilon_schedule": "cosine",  # "cosine" or "exponential"
     "epsilon_warmup_episodes": 1000,  # Fill buffer before learning
     "epsilon_decay": 0.9997,  # Only used if epsilon_schedule == "exponential"
@@ -63,7 +63,7 @@ TRAINING_CONFIG = {
 
 def compute_epsilon(episode: int, total_episodes: int,
                     epsilon_start: float = 0.9,
-                    epsilon_end: float = 0.05,
+                    epsilon_end: float = 0.01,
                     warmup_episodes: int = 1000,
                     schedule: str = "cosine") -> float:
     """
@@ -83,15 +83,19 @@ def compute_epsilon(episode: int, total_episodes: int,
     if episode < warmup_episodes:
         return epsilon_start
 
-    progress = (episode - warmup_episodes) / max(1, total_episodes - warmup_episodes)
-    progress = min(1.0, progress)
+    # NEW: Decay Duration Control
+    # Finish decaying at 90% of episodes, hold constant for the last 10%
+    decay_cutoff = 0.9 
+    decay_episodes = int(total_episodes * decay_cutoff)
+    
+    # Calculate progress relative to the CUTOFF, not the total
+    progress = (episode - warmup_episodes) / max(1, decay_episodes - warmup_episodes)
+    progress = min(1.0, progress) # Cap at 1.0 to hold steady at the end
 
     if schedule == "cosine":
-        # Cosine annealing: slow start, fast middle, slow end
         cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
         return epsilon_end + (epsilon_start - epsilon_end) * cosine_decay
     else:
-        # Linear fallback
         return epsilon_end + (epsilon_start - epsilon_end) * (1 - progress)
 
 # Network configuration (Stage 2 - MLP with enhanced features)
