@@ -63,9 +63,16 @@ class Big2Game:
     - Game ends when any player runs out of cards
     """
 
-    def __init__(self, seed: Optional[int] = None):
-        """Initialize game."""
+    def __init__(self, seed: Optional[int] = None, use_margin_rewards: bool = True):
+        """
+        Initialize game.
+
+        Args:
+            seed: Random seed for shuffling
+            use_margin_rewards: If True, use margin-based rewards (default)
+        """
         self.seed = seed
+        self.use_margin_rewards = use_margin_rewards
         if seed is not None:
             random.seed(seed)
 
@@ -148,7 +155,7 @@ class Big2Game:
 
         # Compute rewards if game is done
         if self.done:
-            rewards = self.compute_rewards()
+            rewards = self.compute_rewards(use_margin=self.use_margin_rewards)
             return None, rewards[move.player], True, {
                 "all_rewards": rewards,
                 "winner": self.winner
@@ -156,14 +163,46 @@ class Big2Game:
         else:
             return None, 0.0, False, {}
 
-    def compute_rewards(self) -> List[float]:
+    def compute_rewards(self, use_margin: bool = True) -> List[float]:
         """
         Compute final rewards for all players.
-        Winner gets +1.0, all others get -1.0.
+
+        Args:
+            use_margin: If True, scale rewards with winning margin.
+                        If False, use simple +1/-1 rewards.
+
+        Returns:
+            List of 4 rewards for each player.
+
+        Margin-based rewards:
+            - Winner: +0.8 base + up to +0.2 margin bonus (0.8 to 1.0)
+            - Losers: -0.8 base - up to -0.2 penalty for cards remaining (-0.8 to -1.0)
+
+        This incentivizes dominant wins while keeping winning as the primary goal.
         """
         assert self.done, "Game must be over to compute rewards"
-        rewards = [-1.0, -1.0, -1.0, -1.0]
-        rewards[self.winner] = 1.0
+
+        if not use_margin:
+            # Original behavior: simple +1/-1
+            rewards = [-1.0, -1.0, -1.0, -1.0]
+            rewards[self.winner] = 1.0
+            return rewards
+
+        # Margin = cards left in losers' hands (0-39, where 39 = 3×13)
+        total_loser_cards = sum(len(self.hands[i]) for i in range(4) if i != self.winner)
+        margin = total_loser_cards / 39.0  # Normalized [0, 1]
+
+        rewards = []
+        for i in range(4):
+            if i == self.winner:
+                # Winner: +0.8 base + up to +0.2 margin bonus
+                # Winning is 80% of the reward, margin is 20%
+                rewards.append(0.8 + 0.2 * margin)
+            else:
+                # Loser: -0.8 base - up to -0.2 penalty for cards remaining
+                cards_left = len(self.hands[i])
+                rewards.append(-0.8 - 0.2 * (cards_left / 13.0))
+
         return rewards
 
     def get_legal_moves_simple(self) -> List[Move]:

@@ -15,9 +15,12 @@ import numpy as np
 
 from ..env import Big2Game, encode_state, encode_action, get_legal_moves, encode_move_history
 from ..models import SimpleNetwork, LSTMNetwork
-from ..config import TRAINING_CONFIG, NETWORK_CONFIG
+from ..config import TRAINING_CONFIG, NETWORK_CONFIG, compute_epsilon, get_opponent_mix
 from .buffer import ReplayBuffer
 from ..agents import select_action_greedy_bot
+
+# Global variable for checkpoint opponent model state dict (loaded once by main process)
+_checkpoint_opponent_state_dict = None
 
 
 def select_action(
@@ -103,7 +106,8 @@ def play_episode(
         - trajectories: List of 4 player trajectories, each containing (state, action, move_history) tuples
         - rewards: List of 4 final rewards
     """
-    game = Big2Game()
+    use_margin = TRAINING_CONFIG.get("use_margin_rewards", True)
+    game = Big2Game(use_margin_rewards=use_margin)
     trajectories = [[], [], [], []]
 
     while not game.done:
@@ -266,8 +270,9 @@ def worker_play_episode(args):
     model.eval()
     device = "cpu"
 
-    # Play episode
-    game = Big2Game()
+    # Play episode (use margin rewards from config)
+    use_margin = TRAINING_CONFIG.get("use_margin_rewards", True)
+    game = Big2Game(use_margin_rewards=use_margin)
     trajectories = [[], [], [], []]
 
     with torch.no_grad():
@@ -335,8 +340,9 @@ def worker_play_episode_vs_greedy(args):
     model.eval()
     device = "cpu"
 
-    # Play episode
-    game = Big2Game()
+    # Play episode (use margin rewards from config)
+    use_margin = TRAINING_CONFIG.get("use_margin_rewards", True)
+    game = Big2Game(use_margin_rewards=use_margin)
     trajectories = [[], [], [], []]  # Only player 0 will be populated
 
     with torch.no_grad():
@@ -402,8 +408,9 @@ def worker_play_episode_vs_random(args):
     model.eval()
     device = "cpu"
 
-    # Play episode
-    game = Big2Game()
+    # Play episode (use margin rewards from config)
+    use_margin = TRAINING_CONFIG.get("use_margin_rewards", True)
+    game = Big2Game(use_margin_rewards=use_margin)
     trajectories = [[], [], [], []]  # Only player 0 will be populated
 
     with torch.no_grad():
@@ -439,11 +446,89 @@ def worker_play_episode_vs_random(args):
     return trajectories, rewards
 
 
+def worker_play_episode_vs_checkpoint(args):
+    """
+    Worker function to play one episode with model as player 0 vs checkpoint opponent.
+
+    Training model as player 0 vs frozen checkpoint model as players 1-3.
+    Checkpoint model uses greedy action selection (no exploration).
+
+    Args:
+        args: Tuple of (model_state_dict, checkpoint_state_dict, epsilon, seed)
+
+    Returns:
+        (trajectories, rewards) where:
+        - trajectories: List of 4 player trajectories (only player 0 has data)
+        - rewards: List of 4 final rewards
+    """
+    model_state_dict, checkpoint_state_dict, epsilon, seed = args
+
+    # Set random seed for this worker
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+    # Create training model on CPU
+    if NETWORK_CONFIG.get("use_lstm", False):
+        model = LSTMNetwork(**NETWORK_CONFIG)
+        checkpoint_model = LSTMNetwork(**NETWORK_CONFIG)
+    else:
+        model = SimpleNetwork(**NETWORK_CONFIG)
+        checkpoint_model = SimpleNetwork(**NETWORK_CONFIG)
+
+    model.load_state_dict(model_state_dict)
+    model.eval()
+
+    # Load checkpoint opponent model
+    checkpoint_model.load_state_dict(checkpoint_state_dict)
+    checkpoint_model.eval()
+
+    device = "cpu"
+
+    # Play episode (use margin rewards from config)
+    use_margin = TRAINING_CONFIG.get("use_margin_rewards", True)
+    game = Big2Game(use_margin_rewards=use_margin)
+    trajectories = [[], [], [], []]  # Only player 0 will be populated
+
+    with torch.no_grad():
+        while not game.done:
+            player = game.current_player
+
+            if player == 0:
+                # Training model plays as player 0 with exploration
+                state = encode_state(game, player)
+                move_history = encode_move_history(game, max_moves=16)
+                action_idx, legal_moves = select_action(game, player, model, epsilon, device)
+                move = legal_moves[action_idx]
+                action_enc = encode_action(move)
+
+                # Store in trajectory
+                trajectories[player].append((
+                    state.copy(),
+                    action_enc.copy(),
+                    move_history.copy()
+                ))
+            else:
+                # Checkpoint model opponents - greedy (no exploration)
+                action_idx, legal_moves = select_action(game, player, checkpoint_model, 0.0, device)
+                move = legal_moves[action_idx]
+
+            # Step game
+            _, _, done, info = game.step(move)
+
+    # Get final rewards
+    rewards = info["all_rewards"]
+
+    return trajectories, rewards
+
+
 def train(
     num_episodes: Optional[int] = None,
     checkpoint_path: Optional[str] = None,
     resume: bool = False,
-    num_workers: int = 6
+    num_workers: int = 6,
+    checkpoint_opponent_path: Optional[str] = None
 ):
     """
     Main training loop with parallel workers.
@@ -453,14 +538,22 @@ def train(
         checkpoint_path: Path to save checkpoints
         resume: Whether to resume from checkpoint
         num_workers: Number of parallel workers (default: 6)
+        checkpoint_opponent_path: Path to frozen opponent model for curriculum learning
     """
+    global _checkpoint_opponent_state_dict
+
     # Get config
-    config = TRAINING_CONFIG
+    config = TRAINING_CONFIG.copy()  # Make a copy to avoid modifying global
     if num_episodes is not None:
         config["num_episodes"] = num_episodes
 
+    total_episodes = config["num_episodes"]
+
     # Setup device
-    if torch.backends.mps.is_available():
+    if torch.cuda.is_available():
+        device = "cuda"
+        print("Using CUDA (NVIDIA GPU) for acceleration")
+    elif torch.backends.mps.is_available():
         device = "mps"
         print("Using MPS (Metal Performance Shaders) for acceleration")
     else:
@@ -479,12 +572,14 @@ def train(
 
     optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
 
-    # Create replay buffer
-    buffer = ReplayBuffer(capacity=config["buffer_size"])
+    # Create replay buffer with normalization setting
+    buffer = ReplayBuffer(
+        capacity=config["buffer_size"],
+        normalize_returns=config.get("normalize_returns", True)
+    )
 
     # Initialize training state
     start_episode = 0
-    epsilon = config["epsilon_start"]
     best_win_rate = 0.0
 
     # Resume from checkpoint if requested
@@ -495,8 +590,31 @@ def train(
         target_model.load_state_dict(checkpoint["target_model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_episode = checkpoint["episode"]
-        epsilon = checkpoint["epsilon"]
         best_win_rate = checkpoint.get("best_win_rate", 0.0)
+        # Note: epsilon is computed fresh from episode/total_episodes
+
+    # Compute initial epsilon based on start episode
+    epsilon = compute_epsilon(
+        start_episode, total_episodes,
+        epsilon_start=config["epsilon_start"],
+        epsilon_end=config["epsilon_end"],
+        warmup_episodes=config.get("epsilon_warmup_episodes", 1000),
+        schedule=config.get("epsilon_schedule", "cosine")
+    )
+
+    # Load checkpoint opponent model for curriculum learning
+    checkpoint_opponent_path = checkpoint_opponent_path or config.get("checkpoint_opponent_path")
+    _checkpoint_opponent_state_dict = None
+    has_checkpoint_opponent = False
+
+    if checkpoint_opponent_path and os.path.exists(checkpoint_opponent_path):
+        print(f"Loading checkpoint opponent from: {checkpoint_opponent_path}")
+        checkpoint_opponent = torch.load(checkpoint_opponent_path, map_location="cpu")
+        _checkpoint_opponent_state_dict = checkpoint_opponent["model_state_dict"]
+        has_checkpoint_opponent = True
+    elif config.get("use_curriculum", False):
+        print("Warning: use_curriculum=True but no checkpoint_opponent_path provided")
+        print("  Checkpoint opponent games will use random opponents instead")
 
     # Create checkpoint directory
     if checkpoint_path:
@@ -505,15 +623,27 @@ def train(
     print("\n" + "=" * 60)
     print("Starting Training")
     print("=" * 60)
-    print(f"Episodes: {config['num_episodes']}")
+    print(f"Episodes: {total_episodes} (starting from {start_episode})")
     print(f"Workers: {num_workers}")
     print(f"Buffer size: {config['buffer_size']}")
     print(f"Batch size: {config['batch_size']}")
     print(f"Learning rate: {config['learning_rate']}")
+    print(f"Epsilon schedule: {config.get('epsilon_schedule', 'cosine')}")
     print(f"Epsilon: {epsilon:.3f} → {config['epsilon_end']:.3f}")
-    print(f"Opponent mix: {config.get('self_play_ratio', 0.7)*100:.0f}% self-play, "
-          f"{config.get('greedy_opponent_ratio', 0.2)*100:.0f}% greedy, "
-          f"{config.get('random_opponent_ratio', 0.1)*100:.0f}% random")
+    print(f"Warmup episodes: {config.get('epsilon_warmup_episodes', 1000)}")
+    print(f"Margin rewards: {config.get('use_margin_rewards', True)}")
+    print(f"Return normalization: {config.get('normalize_returns', True)}")
+    if config.get("use_curriculum", False):
+        opponent_mix = get_opponent_mix(start_episode, total_episodes, config)
+        print(f"Curriculum learning: ON")
+        print(f"  Initial mix: {opponent_mix['self_play']*100:.0f}% self-play, "
+              f"{opponent_mix['greedy']*100:.0f}% greedy, "
+              f"{opponent_mix['checkpoint']*100:.0f}% checkpoint")
+        print(f"  Checkpoint opponent: {'loaded' if has_checkpoint_opponent else 'not available (using random)'}")
+    else:
+        print(f"Opponent mix: {config.get('self_play_ratio', 0.7)*100:.0f}% self-play, "
+              f"{config.get('greedy_opponent_ratio', 0.2)*100:.0f}% greedy, "
+              f"{config.get('random_opponent_ratio', 0.1)*100:.0f}% random")
     print("=" * 60 + "\n")
 
     # Create worker pool
@@ -521,28 +651,40 @@ def train(
         pool = mp.Pool(processes=num_workers)
         print(f"Created worker pool with {num_workers} processes\n")
 
-    # Track win rates for adaptive epsilon
-    recent_win_rates = []
-
     # Training loop
     try:
-        for episode in range(start_episode, config["num_episodes"], num_workers if num_workers > 0 else 1):
+        for episode in range(start_episode, total_episodes, num_workers if num_workers > 0 else 1):
             episode_start = time.time()
+
+            # Compute epsilon using flexible schedule
+            epsilon = compute_epsilon(
+                episode, total_episodes,
+                epsilon_start=config["epsilon_start"],
+                epsilon_end=config["epsilon_end"],
+                warmup_episodes=config.get("epsilon_warmup_episodes", 1000),
+                schedule=config.get("epsilon_schedule", "cosine")
+            )
 
             # Play episodes in parallel with mixed opponents
             if num_workers > 0:
                 # Get CPU model state dict for workers
                 cpu_model_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
 
-                # Calculate worker distribution based on opponent diversity ratios
-                self_play_ratio = config.get("self_play_ratio", 0.7)
-                greedy_ratio = config.get("greedy_opponent_ratio", 0.2)
-                random_ratio = config.get("random_opponent_ratio", 0.1)
+                # Get opponent mix based on curriculum or fixed ratios
+                if config.get("use_curriculum", False):
+                    opponent_mix = get_opponent_mix(episode, total_episodes, config)
+                    self_play_ratio = opponent_mix["self_play"]
+                    greedy_ratio = opponent_mix["greedy"]
+                    checkpoint_ratio = opponent_mix["checkpoint"]
+                else:
+                    self_play_ratio = config.get("self_play_ratio", 0.7)
+                    greedy_ratio = config.get("greedy_opponent_ratio", 0.2)
+                    checkpoint_ratio = config.get("random_opponent_ratio", 0.1)
 
-                # Distribute workers (use floor for each type, remainder goes to self-play)
+                # Distribute workers
                 n_self_play = max(1, int(num_workers * self_play_ratio))
                 n_greedy = int(num_workers * greedy_ratio)
-                n_random = num_workers - n_self_play - n_greedy
+                n_checkpoint = num_workers - n_self_play - n_greedy
 
                 # Create worker arguments for each type
                 base_args = lambda: (cpu_model_state_dict, epsilon, random.randint(0, 1000000))
@@ -553,13 +695,24 @@ def train(
                 # Greedy opponent workers
                 greedy_args = [base_args() for _ in range(n_greedy)]
 
-                # Random opponent workers
-                random_args = [base_args() for _ in range(n_random)]
-
-                # Play episodes in parallel using starmap_async to run different worker functions
+                # Play self-play and greedy episodes
                 self_play_results = pool.map(worker_play_episode, self_play_args) if n_self_play > 0 else []
                 greedy_results = pool.map(worker_play_episode_vs_greedy, greedy_args) if n_greedy > 0 else []
-                random_results = pool.map(worker_play_episode_vs_random, random_args) if n_random > 0 else []
+
+                # Checkpoint opponent workers (or random if no checkpoint available)
+                checkpoint_results = []
+                if n_checkpoint > 0:
+                    if has_checkpoint_opponent and _checkpoint_opponent_state_dict is not None:
+                        # Play against checkpoint model
+                        checkpoint_args = [
+                            (cpu_model_state_dict, _checkpoint_opponent_state_dict, epsilon, random.randint(0, 1000000))
+                            for _ in range(n_checkpoint)
+                        ]
+                        checkpoint_results = pool.map(worker_play_episode_vs_checkpoint, checkpoint_args)
+                    else:
+                        # Fallback to random opponents
+                        random_args = [base_args() for _ in range(n_checkpoint)]
+                        checkpoint_results = pool.map(worker_play_episode_vs_random, random_args)
 
                 # Add self-play transitions to buffer (all 4 players)
                 for trajectories, rewards in self_play_results:
@@ -574,8 +727,8 @@ def train(
                     for state, action, move_history in trajectories[0]:
                         buffer.push(state, action, move_history, episode_return)
 
-                # Add random opponent transitions to buffer (only player 0)
-                for trajectories, rewards in random_results:
+                # Add checkpoint/random opponent transitions to buffer (only player 0)
+                for trajectories, rewards in checkpoint_results:
                     episode_return = rewards[0]  # Model is player 0
                     for state, action, move_history in trajectories[0]:
                         buffer.push(state, action, move_history, episode_return)
@@ -586,9 +739,6 @@ def train(
                     episode_return = rewards[player]
                     for state, action, move_history in trajectories[player]:
                         buffer.push(state, action, move_history, episode_return)
-
-            # Decay epsilon (once per batch of episodes)
-            epsilon = max(config["epsilon_end"], epsilon * config["epsilon_decay"])
 
             # Training step
             loss_value = 0.0
@@ -634,19 +784,6 @@ def train(
                 win_rate_greedy = evaluate_vs_greedy_bot(model, config["eval_games"], device)
 
                 eval_time = time.time() - eval_start
-
-                # Adaptive epsilon scheduling
-                if config.get("adaptive_epsilon", False):
-                    recent_win_rates.append(win_rate_random)
-                    if len(recent_win_rates) > 5:
-                        recent_win_rates.pop(0)
-
-                    # If win rate drops, increase epsilon to explore more
-                    if len(recent_win_rates) >= 2:
-                        win_rate_change = recent_win_rates[-1] - recent_win_rates[-2]
-                        if win_rate_change < -config["epsilon_adapt_threshold"]:
-                            epsilon = min(config["epsilon_start"], epsilon * 1.1)
-                            print(f"  → Increased epsilon to {epsilon:.3f} (win rate dropped by {-win_rate_change*100:.1f}%)")
 
                 # Logging
                 episode_time = time.time() - episode_start

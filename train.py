@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from big2_ai.training import train
-from big2_ai.config import print_config
+from big2_ai.config import print_config, TRAINING_CONFIG
 
 
 def main():
@@ -14,8 +14,8 @@ def main():
     parser.add_argument(
         "--episodes",
         type=int,
-        default=50000,
-        help="Number of training episodes (default: 50000)"
+        default=100000,
+        help="Number of training episodes (default: 100000)"
     )
     parser.add_argument(
         "--checkpoint",
@@ -39,6 +39,12 @@ def main():
         default=6,
         help="Number of parallel workers (default: 6, set to 0 for single-threaded)"
     )
+    parser.add_argument(
+        "--checkpoint-opponent",
+        type=str,
+        default="checkpoints/22k.pt",
+        help="Path to frozen opponent model for curriculum learning (e.g., checkpoints/22k.pt)"
+    )
 
     args = parser.parse_args()
 
@@ -55,6 +61,8 @@ def main():
     print(f"Workers: {args.workers}")
     print(f"Checkpoint: {args.checkpoint}")
     print(f"Resume: {args.resume}")
+    if args.checkpoint_opponent:
+        print(f"Checkpoint opponent: {args.checkpoint_opponent}")
     print("=" * 60 + "\n")
 
     # Train
@@ -62,7 +70,8 @@ def main():
         num_episodes=args.episodes,
         checkpoint_path=args.checkpoint,
         resume=args.resume,
-        num_workers=args.workers
+        num_workers=args.workers,
+        checkpoint_opponent_path=args.checkpoint_opponent
     )
 
     print(f"\nTraining complete! Best win rate: {best_win_rate*100:.1f}%")
