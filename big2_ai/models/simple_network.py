@@ -8,23 +8,23 @@ from typing import Tuple
 
 class SimpleNetwork(nn.Module):
     """
-    Simple dense network for Q-value estimation (Stage 2 - deeper MLP).
+    Simple dense network for Q-value estimation (Stage 2 - legitimate encoding).
 
     Architecture:
-        Input: state (149) + action (52) = 201 dims
+        Input: state (167) + action (52) = 219 dims
         ↓
-        Linear(201 → 256) + ReLU
+        Linear(219 → 256) + ReLU
+        ↓
+        Linear(256 → 256) + ReLU
         ↓
         Linear(256 → 256) + ReLU
         ↓
         Linear(256 → 256) + ReLU
-        ↓
-        Linear(256 → 256) + ReLU  # NEW (4th hidden layer)
         ↓
         Linear(256 → 1)  # Q-value
     """
 
-    def __init__(self, state_dim: int = 149, action_dim: int = 52, hidden_dim: int = 256, **kwargs):
+    def __init__(self, state_dim: int = 167, action_dim: int = 52, hidden_dim: int = 256, **kwargs):
         """
         Initialize network.
 
@@ -91,8 +91,8 @@ class SimpleNetwork(nn.Module):
 
 
 def test_network():
-    """Test network forward pass (Stage 2 - deeper MLP)."""
-    print("Testing SimpleNetwork (Stage 2)...")
+    """Test network forward pass (Stage 2 - legitimate encoding)."""
+    print("Testing SimpleNetwork (Stage 2 - Legitimate Encoding)...")
 
     # Create network
     net = SimpleNetwork()
@@ -102,7 +102,7 @@ def test_network():
 
     # Test forward pass
     batch_size = 32
-    state_dim = 149  # Stage 2 state dimension
+    state_dim = 167  # Stage 2 state dimension (legitimate encoding)
     action_dim = 52
 
     states = torch.randn(batch_size, state_dim)

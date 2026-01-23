@@ -13,14 +13,18 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 
-from ..env import Big2Game, encode_state, encode_action, get_legal_moves, encode_move_history
-from ..models import SimpleNetwork, LSTMNetwork
-from ..config import TRAINING_CONFIG, NETWORK_CONFIG, compute_epsilon, get_opponent_mix
+from ..env import Big2Game, encode_state, encode_action, get_legal_moves, encode_move_history, encode_perfect_state, PERFECT_STATE_DIM
+from ..models import SimpleNetwork, LSTMNetwork, CriticNetwork
+from ..config import TRAINING_CONFIG, NETWORK_CONFIG, CRITIC_CONFIG, compute_epsilon, get_opponent_mix
 from .buffer import ReplayBuffer
+from .league import League
 from ..agents import select_action_greedy_bot
 
 # Global variable for checkpoint opponent model state dict (loaded once by main process)
 _checkpoint_opponent_state_dict = None
+
+# Global variable for league (initialized in train())
+_league: Optional[League] = None
 
 
 def select_action(
@@ -91,19 +95,23 @@ def select_action(
 def play_episode(
     model,
     epsilon: float,
-    device: str
+    device: str,
+    collect_perfect: bool = False
 ) -> Tuple[List[List[Tuple]], List[float]]:
     """
-    Play one episode of self-play (Stage 2).
+    Play one episode of self-play (Stage 2 with optional PTIE support).
 
     Args:
         model: Policy network (SimpleNetwork or LSTMNetwork)
         epsilon: Exploration rate
         device: Device to run model on
+        collect_perfect: Whether to collect perfect states for PTIE
 
     Returns:
         (trajectories, rewards) where:
-        - trajectories: List of 4 player trajectories, each containing (state, action, move_history) tuples
+        - trajectories: List of 4 player trajectories, each containing
+          (state, action, move_history) tuples, or
+          (state, action, move_history, perfect_state) if collect_perfect=True
         - rewards: List of 4 final rewards
     """
     use_margin = TRAINING_CONFIG.get("use_margin_rewards", True)
@@ -119,6 +127,9 @@ def play_episode(
         # Encode move history
         move_history = encode_move_history(game, max_moves=16)
 
+        # Encode perfect state for PTIE (if enabled)
+        perfect_state = encode_perfect_state(game) if collect_perfect else None
+
         # Select action
         action_idx, legal_moves = select_action(game, player, model, epsilon, device)
         move = legal_moves[action_idx]
@@ -126,12 +137,20 @@ def play_episode(
         # Encode action
         action_enc = encode_action(move)
 
-        # Store in trajectory WITH move history
-        trajectories[player].append((
-            state.copy(),
-            action_enc.copy(),
-            move_history.copy()
-        ))
+        # Store in trajectory WITH move history (and optional perfect state)
+        if collect_perfect:
+            trajectories[player].append((
+                state.copy(),
+                action_enc.copy(),
+                move_history.copy(),
+                perfect_state.copy()
+            ))
+        else:
+            trajectories[player].append((
+                state.copy(),
+                action_enc.copy(),
+                move_history.copy()
+            ))
 
         # Step game
         _, _, done, info = game.step(move)
@@ -239,19 +258,26 @@ def evaluate_vs_greedy_bot(
 
 def worker_play_episode(args):
     """
-    Worker function to play one episode (Stage 2).
+    Worker function to play one episode (Stage 2 with PTIE support).
 
     This function is designed to be called by multiprocessing workers.
 
     Args:
-        args: Tuple of (model_state_dict, epsilon, seed)
+        args: Tuple of (model_state_dict, epsilon, seed, collect_perfect)
+              or (model_state_dict, epsilon, seed) for backwards compatibility
 
     Returns:
         (trajectories, rewards) where:
-        - trajectories: List of 4 player trajectories, each containing (state, action, move_history) tuples
+        - trajectories: List of 4 player trajectories, each containing
+          (state, action, move_history) or (state, action, move_history, perfect_state) tuples
         - rewards: List of 4 final rewards
     """
-    model_state_dict, epsilon, seed = args
+    # Handle both old and new argument formats
+    if len(args) == 4:
+        model_state_dict, epsilon, seed, collect_perfect = args
+    else:
+        model_state_dict, epsilon, seed = args
+        collect_perfect = TRAINING_CONFIG.get("use_ptie", False)
 
     # Set random seed for this worker
     if seed is not None:
@@ -285,6 +311,9 @@ def worker_play_episode(args):
             # Encode move history
             move_history = encode_move_history(game, max_moves=16)
 
+            # Encode perfect state for PTIE (if enabled)
+            perfect_state = encode_perfect_state(game) if collect_perfect else None
+
             # Select action
             action_idx, legal_moves = select_action(game, player, model, epsilon, device)
             move = legal_moves[action_idx]
@@ -292,12 +321,20 @@ def worker_play_episode(args):
             # Encode action
             action_enc = encode_action(move)
 
-            # Store in trajectory WITH move history
-            trajectories[player].append((
-                state.copy(),
-                action_enc.copy(),
-                move_history.copy()
-            ))
+            # Store in trajectory WITH move history (and optional perfect state)
+            if collect_perfect:
+                trajectories[player].append((
+                    state.copy(),
+                    action_enc.copy(),
+                    move_history.copy(),
+                    perfect_state.copy()
+                ))
+            else:
+                trajectories[player].append((
+                    state.copy(),
+                    action_enc.copy(),
+                    move_history.copy()
+                ))
 
             # Step game
             _, _, done, info = game.step(move)
@@ -315,14 +352,20 @@ def worker_play_episode_vs_greedy(args):
     Only collects trajectory for player 0 (the model).
 
     Args:
-        args: Tuple of (model_state_dict, epsilon, seed)
+        args: Tuple of (model_state_dict, epsilon, seed, collect_perfect)
+              or (model_state_dict, epsilon, seed) for backwards compatibility
 
     Returns:
         (trajectories, rewards) where:
         - trajectories: List of 4 player trajectories (only player 0 has data)
         - rewards: List of 4 final rewards
     """
-    model_state_dict, epsilon, seed = args
+    # Handle both old and new argument formats
+    if len(args) == 4:
+        model_state_dict, epsilon, seed, collect_perfect = args
+    else:
+        model_state_dict, epsilon, seed = args
+        collect_perfect = TRAINING_CONFIG.get("use_ptie", False)
 
     # Set random seed for this worker
     if seed is not None:
@@ -353,16 +396,25 @@ def worker_play_episode_vs_greedy(args):
                 # Model plays as player 0
                 state = encode_state(game, player)
                 move_history = encode_move_history(game, max_moves=16)
+                perfect_state = encode_perfect_state(game) if collect_perfect else None
                 action_idx, legal_moves = select_action(game, player, model, epsilon, device)
                 move = legal_moves[action_idx]
                 action_enc = encode_action(move)
 
                 # Store in trajectory
-                trajectories[player].append((
-                    state.copy(),
-                    action_enc.copy(),
-                    move_history.copy()
-                ))
+                if collect_perfect:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy(),
+                        perfect_state.copy()
+                    ))
+                else:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy()
+                    ))
             else:
                 # Greedy bot opponents
                 move = select_action_greedy_bot(game, player)
@@ -383,14 +435,20 @@ def worker_play_episode_vs_random(args):
     Only collects trajectory for player 0 (the model).
 
     Args:
-        args: Tuple of (model_state_dict, epsilon, seed)
+        args: Tuple of (model_state_dict, epsilon, seed, collect_perfect)
+              or (model_state_dict, epsilon, seed) for backwards compatibility
 
     Returns:
         (trajectories, rewards) where:
         - trajectories: List of 4 player trajectories (only player 0 has data)
         - rewards: List of 4 final rewards
     """
-    model_state_dict, epsilon, seed = args
+    # Handle both old and new argument formats
+    if len(args) == 4:
+        model_state_dict, epsilon, seed, collect_perfect = args
+    else:
+        model_state_dict, epsilon, seed = args
+        collect_perfect = TRAINING_CONFIG.get("use_ptie", False)
 
     # Set random seed for this worker
     if seed is not None:
@@ -421,16 +479,25 @@ def worker_play_episode_vs_random(args):
                 # Model plays as player 0
                 state = encode_state(game, player)
                 move_history = encode_move_history(game, max_moves=16)
+                perfect_state = encode_perfect_state(game) if collect_perfect else None
                 action_idx, legal_moves = select_action(game, player, model, epsilon, device)
                 move = legal_moves[action_idx]
                 action_enc = encode_action(move)
 
                 # Store in trajectory
-                trajectories[player].append((
-                    state.copy(),
-                    action_enc.copy(),
-                    move_history.copy()
-                ))
+                if collect_perfect:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy(),
+                        perfect_state.copy()
+                    ))
+                else:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy()
+                    ))
             else:
                 # Random opponents
                 legal_moves = get_legal_moves(game, player)
@@ -454,14 +521,20 @@ def worker_play_episode_vs_checkpoint(args):
     Checkpoint model uses greedy action selection (no exploration).
 
     Args:
-        args: Tuple of (model_state_dict, checkpoint_state_dict, epsilon, seed)
+        args: Tuple of (model_state_dict, checkpoint_state_dict, epsilon, seed, collect_perfect)
+              For backwards compatibility, also accepts 4 args without collect_perfect.
 
     Returns:
         (trajectories, rewards) where:
         - trajectories: List of 4 player trajectories (only player 0 has data)
         - rewards: List of 4 final rewards
     """
-    model_state_dict, checkpoint_state_dict, epsilon, seed = args
+    # Handle both old (4 args) and new (5 args with PTIE) formats
+    if len(args) == 5:
+        model_state_dict, checkpoint_state_dict, epsilon, seed, collect_perfect = args
+    else:
+        model_state_dict, checkpoint_state_dict, epsilon, seed = args
+        collect_perfect = False
 
     # Set random seed for this worker
     if seed is not None:
@@ -499,16 +572,30 @@ def worker_play_episode_vs_checkpoint(args):
                 # Training model plays as player 0 with exploration
                 state = encode_state(game, player)
                 move_history = encode_move_history(game, max_moves=16)
+
+                # Collect perfect state for PTIE if requested
+                perfect_state = None
+                if collect_perfect:
+                    perfect_state = encode_perfect_state(game)
+
                 action_idx, legal_moves = select_action(game, player, model, epsilon, device)
                 move = legal_moves[action_idx]
                 action_enc = encode_action(move)
 
-                # Store in trajectory
-                trajectories[player].append((
-                    state.copy(),
-                    action_enc.copy(),
-                    move_history.copy()
-                ))
+                # Store in trajectory (include perfect_state if collecting)
+                if collect_perfect:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy(),
+                        perfect_state.copy()
+                    ))
+                else:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy()
+                    ))
             else:
                 # Checkpoint model opponents - greedy (no exploration)
                 action_idx, legal_moves = select_action(game, player, checkpoint_model, 0.0, device)
@@ -528,7 +615,9 @@ def train(
     checkpoint_path: Optional[str] = None,
     resume: bool = False,
     num_workers: int = 6,
-    checkpoint_opponent_path: Optional[str] = None
+    checkpoint_opponent_path: Optional[str] = None,
+    use_league: bool = False,
+    league_dir: Optional[str] = None
 ):
     """
     Main training loop with parallel workers.
@@ -539,8 +628,10 @@ def train(
         resume: Whether to resume from checkpoint
         num_workers: Number of parallel workers (default: 6)
         checkpoint_opponent_path: Path to frozen opponent model for curriculum learning
+        use_league: Enable league training with opponent pool
+        league_dir: Directory for league checkpoints
     """
-    global _checkpoint_opponent_state_dict
+    global _checkpoint_opponent_state_dict, _league
 
     # Get config
     config = TRAINING_CONFIG.copy()  # Make a copy to avoid modifying global
@@ -572,6 +663,18 @@ def train(
 
     optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
 
+    # PTIE: Create critic network if enabled
+    use_ptie = config.get("use_ptie", False)
+    critic = None
+    critic_optimizer = None
+    if use_ptie:
+        critic = CriticNetwork(**CRITIC_CONFIG).to(device)
+        critic_optimizer = optim.Adam(
+            critic.parameters(),
+            lr=config.get("critic_learning_rate", 1e-4)
+        )
+        print("Using PTIE with Critic Network")
+
     # Create replay buffer with normalization setting
     buffer = ReplayBuffer(
         capacity=config["buffer_size"],
@@ -582,6 +685,10 @@ def train(
     start_episode = 0
     best_win_rate = 0.0
 
+    # Top-K checkpoint tracking
+    top_k = config.get("top_k_checkpoints", 5)
+    top_checkpoints = []  # List of (win_rate, episode, path)
+
     # Resume from checkpoint if requested
     if resume and checkpoint_path and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
@@ -591,6 +698,12 @@ def train(
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_episode = checkpoint["episode"]
         best_win_rate = checkpoint.get("best_win_rate", 0.0)
+        # Load critic if PTIE is enabled and critic was saved
+        if use_ptie and critic is not None and "critic_state_dict" in checkpoint:
+            critic.load_state_dict(checkpoint["critic_state_dict"])
+            if "critic_optimizer_state_dict" in checkpoint:
+                critic_optimizer.load_state_dict(checkpoint["critic_optimizer_state_dict"])
+            print("  Loaded critic from checkpoint")
         # Note: epsilon is computed fresh from episode/total_episodes
 
     # Compute initial epsilon based on start episode
@@ -612,9 +725,29 @@ def train(
         checkpoint_opponent = torch.load(checkpoint_opponent_path, map_location="cpu")
         _checkpoint_opponent_state_dict = checkpoint_opponent["model_state_dict"]
         has_checkpoint_opponent = True
-    elif config.get("use_curriculum", False):
+    elif config.get("use_curriculum", False) and not use_league:
         print("Warning: use_curriculum=True but no checkpoint_opponent_path provided")
         print("  Checkpoint opponent games will use random opponents instead")
+
+    # Initialize league training if enabled
+    use_league = use_league or config.get("use_league", False)
+    league_dir = league_dir or config.get("league_dir", "checkpoints/league")
+    _league = None
+    current_win_rate = 0.25  # Track current agent's win rate for skill-matched sampling
+
+    if use_league:
+        _league = League(league_dir, max_opponents=config.get("league_max_opponents", 20))
+        loaded = _league.load_from_disk()
+        if loaded:
+            print(f"Loaded league from: {league_dir} ({len(_league)} opponents)")
+        else:
+            print(f"Initialized new league at: {league_dir}")
+
+        # Take initial snapshot if configured and pool is empty
+        if config.get("league_initial_snapshot", True) and len(_league) == 0:
+            cpu_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
+            _league.add_snapshot(cpu_state_dict, start_episode, current_win_rate)
+            print(f"  Added initial snapshot to league pool")
 
     # Create checkpoint directory
     if checkpoint_path:
@@ -633,13 +766,22 @@ def train(
     print(f"Warmup episodes: {config.get('epsilon_warmup_episodes', 1000)}")
     print(f"Margin rewards: {config.get('use_margin_rewards', True)}")
     print(f"Return normalization: {config.get('normalize_returns', True)}")
+    print(f"PTIE (Perfect Info Critic): {'ON' if use_ptie else 'OFF'}")
+    if use_league:
+        print(f"League training: ON")
+        print(f"  League dir: {league_dir}")
+        print(f"  Opponents in pool: {len(_league)}")
+        print(f"  Snapshot frequency: {config.get('league_snapshot_freq', 2000)} episodes")
     if config.get("use_curriculum", False):
         opponent_mix = get_opponent_mix(start_episode, total_episodes, config)
         print(f"Curriculum learning: ON")
         print(f"  Initial mix: {opponent_mix['self_play']*100:.0f}% self-play, "
               f"{opponent_mix['greedy']*100:.0f}% greedy, "
               f"{opponent_mix['checkpoint']*100:.0f}% checkpoint")
-        print(f"  Checkpoint opponent: {'loaded' if has_checkpoint_opponent else 'not available (using random)'}")
+        if use_league:
+            print(f"  Checkpoint workers: using league pool (skill-matched sampling)")
+        else:
+            print(f"  Checkpoint opponent: {'loaded' if has_checkpoint_opponent else 'not available (using random)'}")
     else:
         print(f"Opponent mix: {config.get('self_play_ratio', 0.7)*100:.0f}% self-play, "
               f"{config.get('greedy_opponent_ratio', 0.2)*100:.0f}% greedy, "
@@ -686,8 +828,8 @@ def train(
                 n_greedy = int(num_workers * greedy_ratio)
                 n_checkpoint = num_workers - n_self_play - n_greedy
 
-                # Create worker arguments for each type
-                base_args = lambda: (cpu_model_state_dict, epsilon, random.randint(0, 1000000))
+                # Create worker arguments for each type (include PTIE flag)
+                base_args = lambda: (cpu_model_state_dict, epsilon, random.randint(0, 1000000), use_ptie)
 
                 # Self-play workers
                 self_play_args = [base_args() for _ in range(n_self_play)]
@@ -699,13 +841,23 @@ def train(
                 self_play_results = pool.map(worker_play_episode, self_play_args) if n_self_play > 0 else []
                 greedy_results = pool.map(worker_play_episode_vs_greedy, greedy_args) if n_greedy > 0 else []
 
-                # Checkpoint opponent workers (or random if no checkpoint available)
+                # Checkpoint opponent workers (league, single checkpoint, or random fallback)
                 checkpoint_results = []
                 if n_checkpoint > 0:
-                    if has_checkpoint_opponent and _checkpoint_opponent_state_dict is not None:
-                        # Play against checkpoint model
+                    if use_league and _league is not None and len(_league) > 0:
+                        # League training: sample different opponents for each worker
+                        checkpoint_args = []
+                        for _ in range(n_checkpoint):
+                            opponent = _league.sample_opponent(current_win_rate)
+                            opponent_state_dict = _league.get_opponent_state_dict(opponent)
+                            checkpoint_args.append(
+                                (cpu_model_state_dict, opponent_state_dict, epsilon, random.randint(0, 1000000), use_ptie)
+                            )
+                        checkpoint_results = pool.map(worker_play_episode_vs_checkpoint, checkpoint_args)
+                    elif has_checkpoint_opponent and _checkpoint_opponent_state_dict is not None:
+                        # Play against single checkpoint model (include PTIE flag)
                         checkpoint_args = [
-                            (cpu_model_state_dict, _checkpoint_opponent_state_dict, epsilon, random.randint(0, 1000000))
+                            (cpu_model_state_dict, _checkpoint_opponent_state_dict, epsilon, random.randint(0, 1000000), use_ptie)
                             for _ in range(n_checkpoint)
                         ]
                         checkpoint_results = pool.map(worker_play_episode_vs_checkpoint, checkpoint_args)
@@ -718,33 +870,60 @@ def train(
                 for trajectories, rewards in self_play_results:
                     for player in range(4):
                         episode_return = rewards[player]
-                        for state, action, move_history in trajectories[player]:
-                            buffer.push(state, action, move_history, episode_return)
+                        for transition in trajectories[player]:
+                            if use_ptie and len(transition) == 4:
+                                state, action, move_history, perfect_state = transition
+                                buffer.push(state, action, move_history, episode_return, perfect_state)
+                            else:
+                                state, action, move_history = transition
+                                buffer.push(state, action, move_history, episode_return)
 
                 # Add greedy opponent transitions to buffer (only player 0)
                 for trajectories, rewards in greedy_results:
                     episode_return = rewards[0]  # Model is player 0
-                    for state, action, move_history in trajectories[0]:
-                        buffer.push(state, action, move_history, episode_return)
+                    for transition in trajectories[0]:
+                        if use_ptie and len(transition) == 4:
+                            state, action, move_history, perfect_state = transition
+                            buffer.push(state, action, move_history, episode_return, perfect_state)
+                        else:
+                            state, action, move_history = transition
+                            buffer.push(state, action, move_history, episode_return)
 
                 # Add checkpoint/random opponent transitions to buffer (only player 0)
                 for trajectories, rewards in checkpoint_results:
                     episode_return = rewards[0]  # Model is player 0
-                    for state, action, move_history in trajectories[0]:
-                        buffer.push(state, action, move_history, episode_return)
+                    for transition in trajectories[0]:
+                        if use_ptie and len(transition) == 4:
+                            state, action, move_history, perfect_state = transition
+                            buffer.push(state, action, move_history, episode_return, perfect_state)
+                        else:
+                            state, action, move_history = transition
+                            buffer.push(state, action, move_history, episode_return)
             else:
                 # Single-threaded fallback (self-play only)
-                trajectories, rewards = play_episode(model, epsilon, device)
+                trajectories, rewards = play_episode(model, epsilon, device, collect_perfect=use_ptie)
                 for player in range(4):
                     episode_return = rewards[player]
-                    for state, action, move_history in trajectories[player]:
-                        buffer.push(state, action, move_history, episode_return)
+                    for transition in trajectories[player]:
+                        if use_ptie and len(transition) == 4:
+                            state, action, move_history, perfect_state = transition
+                            buffer.push(state, action, move_history, episode_return, perfect_state)
+                        else:
+                            state, action, move_history = transition
+                            buffer.push(state, action, move_history, episode_return)
 
             # Training step
             loss_value = 0.0
+            critic_loss_value = 0.0
             if len(buffer) >= config["batch_size"]:
-                # Sample batch WITH HISTORY
-                states, actions, move_histories, returns = buffer.sample_arrays(config["batch_size"])
+                # Sample batch WITH HISTORY (and perfect states if PTIE enabled)
+                if use_ptie:
+                    states, actions, move_histories, returns, perfect_states = buffer.sample_arrays(
+                        config["batch_size"], include_perfect=True
+                    )
+                else:
+                    states, actions, move_histories, returns = buffer.sample_arrays(config["batch_size"])
+                    perfect_states = None
 
                 # Convert to tensors
                 states_t = torch.from_numpy(states).to(device)
@@ -752,22 +931,52 @@ def train(
                 histories_t = torch.from_numpy(move_histories).to(device)
                 returns_t = torch.from_numpy(returns).to(device)
 
-                # Forward pass
+                # PTIE: Train critic on perfect information
+                if use_ptie and perfect_states is not None and critic is not None:
+                    perfect_states_t = torch.from_numpy(perfect_states).to(device)
+
+                    # Critic predicts value from perfect state
+                    critic_values = critic.predict_value(perfect_states_t)
+
+                    # Critic loss: MSE between predicted value and actual return
+                    critic_loss = F.mse_loss(critic_values, returns_t)
+                    critic_loss_value = critic_loss.item()
+
+                    # Update critic
+                    critic_optimizer.zero_grad()
+                    critic_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(critic.parameters(), config["grad_clip"])
+                    critic_optimizer.step()
+
+                    # Compute advantage for actor training (detach critic to not backprop through it)
+                    with torch.no_grad():
+                        advantages = returns_t - critic.predict_value(perfect_states_t)
+
+                # Forward pass for actor
                 if isinstance(model, LSTMNetwork):
                     q_values = model.predict_q_values(histories_t, states_t, actions_t)
                 else:
                     q_values = model.predict_q_values(states_t, actions_t)
 
-                # Compute loss
-                loss = F.mse_loss(q_values, returns_t)
+                # Compute actor loss
+                if use_ptie and perfect_states is not None:
+                    # Use baseline-subtracted returns (advantage-weighted)
+                    with torch.no_grad():
+                        baseline = critic.predict_value(perfect_states_t)
+                    # Actor learns to predict advantage (return - baseline)
+                    actor_loss = F.mse_loss(q_values, returns_t - baseline)
+                else:
+                    # Standard Q-learning loss
+                    actor_loss = F.mse_loss(q_values, returns_t)
 
-                # Backward pass
+                loss = actor_loss
+                loss_value = loss.item()
+
+                # Backward pass for actor
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
                 optimizer.step()
-
-                loss_value = loss.item()
 
             # Update target network
             if episode > 0 and episode % config["target_update_freq"] == 0:
@@ -777,51 +986,110 @@ def train(
             if episode > 0 and episode % config["eval_freq"] == 0:
                 eval_start = time.time()
 
-                # Evaluate vs random opponents
-                win_rate_random = evaluate_vs_random(model, config["eval_games"], device)
-
                 # Evaluate vs greedy bot opponents
                 win_rate_greedy = evaluate_vs_greedy_bot(model, config["eval_games"], device)
+
+                # Update current win rate for skill-matched league sampling
+                current_win_rate = win_rate_greedy
 
                 eval_time = time.time() - eval_start
 
                 # Logging
                 episode_time = time.time() - episode_start
                 episodes_per_sec = num_workers / episode_time if num_workers > 0 else 1.0 / episode_time
-                print(f"Episode {episode:6d} | "
-                      f"ε={epsilon:.3f} | "
-                      f"WinRand={win_rate_random*100:5.1f}% | "
-                      f"WinGreedy={win_rate_greedy*100:5.1f}% | "
-                      f"Loss={loss_value:.4f} | "
-                      f"Buffer={len(buffer):5d} | "
-                      f"Eps/s={episodes_per_sec:.1f}")
+                if use_ptie:
+                    print(f"Episode {episode:6d} | "
+                          f"ε={epsilon:.3f} | "
+                          f"WinGreedy={win_rate_greedy*100:5.1f}% | "
+                          f"ActorL={loss_value:.4f} | "
+                          f"CriticL={critic_loss_value:.4f} | "
+                          f"Buffer={len(buffer):5d} | "
+                          f"Eps/s={episodes_per_sec:.1f}")
+                else:
+                    print(f"Episode {episode:6d} | "
+                          f"ε={epsilon:.3f} | "
+                          f"WinGreedy={win_rate_greedy*100:5.1f}% | "
+                          f"Loss={loss_value:.4f} | "
+                          f"Buffer={len(buffer):5d} | "
+                          f"Eps/s={episodes_per_sec:.1f}")
 
                 # Save best model (based on greedy bot win rate)
-                if checkpoint_path and win_rate_greedy > best_win_rate:
+                # Tie-breaker: prefer newer model (higher episode) if win rates equal
+                if checkpoint_path and win_rate_greedy >= best_win_rate:
                     best_win_rate = win_rate_greedy
                     best_path = checkpoint_path.replace(".pt", "_best.pt")
-                    torch.save({
+                    checkpoint_dict = {
                         "episode": episode,
                         "model_state_dict": model.state_dict(),
                         "target_model_state_dict": target_model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
                         "epsilon": epsilon,
-                        "win_rate_random": win_rate_random,
                         "win_rate_greedy": win_rate_greedy,
                         "best_win_rate": best_win_rate,
-                    }, best_path)
-                    print(f"  → Saved best model (greedy win rate: {win_rate_greedy*100:.1f}%, random win rate: {win_rate_random*100:.1f}%)")
+                        "use_ptie": use_ptie,
+                    }
+                    # Include critic if PTIE is enabled
+                    if use_ptie and critic is not None:
+                        checkpoint_dict["critic_state_dict"] = critic.state_dict()
+                        checkpoint_dict["critic_optimizer_state_dict"] = critic_optimizer.state_dict()
+                    torch.save(checkpoint_dict, best_path)
+                    print(f"  → Saved best model (greedy win rate: {win_rate_greedy*100:.1f}%)")
+
+                # Top-K checkpoint management
+                if checkpoint_path and win_rate_greedy > 0:
+                    top_ckpt_path = checkpoint_path.replace(".pt", f"_top_{episode}.pt")
+
+                    # Save this checkpoint
+                    checkpoint_dict = {
+                        "episode": episode,
+                        "model_state_dict": model.state_dict(),
+                        "target_model_state_dict": target_model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "epsilon": epsilon,
+                        "win_rate_greedy": win_rate_greedy,
+                        "best_win_rate": best_win_rate,
+                        "use_ptie": use_ptie,
+                    }
+                    if use_ptie and critic is not None:
+                        checkpoint_dict["critic_state_dict"] = critic.state_dict()
+                        checkpoint_dict["critic_optimizer_state_dict"] = critic_optimizer.state_dict()
+                    torch.save(checkpoint_dict, top_ckpt_path)
+                    top_checkpoints.append((win_rate_greedy, episode, top_ckpt_path))
+
+                    # Sort by win rate (descending), then by episode (descending) for tie-breaking
+                    # This ensures newer models are preferred when win rates are equal
+                    top_checkpoints.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+                    # Remove excess checkpoints (keep only top K)
+                    while len(top_checkpoints) > top_k:
+                        _, _, old_path = top_checkpoints.pop()
+                        if os.path.exists(old_path):
+                            os.remove(old_path)
 
             # Save checkpoint
             if checkpoint_path and episode > 0 and episode % config["save_freq"] == 0:
-                torch.save({
+                checkpoint_dict = {
                     "episode": episode,
                     "model_state_dict": model.state_dict(),
                     "target_model_state_dict": target_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "epsilon": epsilon,
                     "best_win_rate": best_win_rate,
-                }, checkpoint_path)
+                    "use_ptie": use_ptie,
+                }
+                # Include critic if PTIE is enabled
+                if use_ptie and critic is not None:
+                    checkpoint_dict["critic_state_dict"] = critic.state_dict()
+                    checkpoint_dict["critic_optimizer_state_dict"] = critic_optimizer.state_dict()
+                torch.save(checkpoint_dict, checkpoint_path)
+
+            # League snapshot
+            if use_league and _league is not None:
+                snapshot_freq = config.get("league_snapshot_freq", 2000)
+                if episode > 0 and episode % snapshot_freq == 0:
+                    cpu_state_dict = {k: v.cpu() for k, v in model.state_dict().items()}
+                    snapshot_path = _league.add_snapshot(cpu_state_dict, episode, current_win_rate)
+                    print(f"  → League snapshot saved (gen {episode}, win_rate={current_win_rate*100:.1f}%, pool size={len(_league)})")
     finally:
         # Clean up worker pool
         if num_workers > 0:

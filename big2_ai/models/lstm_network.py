@@ -11,13 +11,13 @@ class LSTMNetwork(nn.Module):
 
     Architecture:
     1. LSTM processes move history sequence (16 moves × 52 dims)
-    2. LSTM output concatenated with static state (hand, opponent info)
+    2. LSTM output concatenated with static state (167 dims)
     3. Dense layers process combined features → Q-value
     """
 
     def __init__(
         self,
-        state_dim: int = 195,
+        state_dim: int = 167,  # Updated for legitimate state encoding
         action_dim: int = 52,
         hidden_dim: int = 256,
         lstm_hidden: int = 128,
@@ -104,9 +104,11 @@ class LSTMNetwork(nn.Module):
 
 if __name__ == "__main__":
     # Test
+    print("Testing LSTMNetwork (Stage 2 - Legitimate Encoding)...")
+
     batch_size = 32
     history_length = 16
-    state_dim = 195
+    state_dim = 167  # Updated for legitimate state encoding
     action_dim = 52
 
     model = LSTMNetwork(
@@ -132,3 +134,4 @@ if __name__ == "__main__":
     print(f"  action: {action.shape}")
     print(f"Output Q-values: {q_values.shape}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print("\nTest passed!")

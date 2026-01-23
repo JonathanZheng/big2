@@ -9,11 +9,12 @@ from typing import List, Tuple, Optional
 
 @dataclass
 class Transition:
-    """A single Monte Carlo transition (Stage 2)."""
-    state: np.ndarray  # State encoding (195,)
+    """A single Monte Carlo transition (Stage 2 with optional PTIE support)."""
+    state: np.ndarray  # Observable state encoding (167,)
     action: np.ndarray  # Action encoding (52,)
     move_history: np.ndarray  # Move history sequence (16, 52)
     episode_return: float  # Final reward from this state
+    perfect_state: Optional[np.ndarray] = None  # Perfect state for PTIE critic (321,)
 
 
 class ReplayBuffer:
@@ -53,15 +54,17 @@ class ReplayBuffer:
         return math.sqrt(variance) if variance > 0 else 1.0
 
     def push(self, state: np.ndarray, action: np.ndarray,
-             move_history: np.ndarray, episode_return: float):
+             move_history: np.ndarray, episode_return: float,
+             perfect_state: Optional[np.ndarray] = None):
         """
         Add a transition to the buffer.
 
         Args:
-            state: State encoding (195,)
+            state: Observable state encoding (167,)
             action: Action encoding (52,)
             move_history: Move history sequence (16, 52)
             episode_return: Episode return from this state
+            perfect_state: Optional perfect state for PTIE critic (321,)
         """
         # Update running statistics (Welford's algorithm)
         self.return_count += 1
@@ -71,7 +74,7 @@ class ReplayBuffer:
         self.return_m2 += delta * delta2
 
         # Add transition to buffer
-        transition = Transition(state, action, move_history, episode_return)
+        transition = Transition(state, action, move_history, episode_return, perfect_state)
 
         if len(self.buffer) < self.capacity:
             self.buffer.append(transition)
@@ -92,7 +95,7 @@ class ReplayBuffer:
         """
         return random.sample(self.buffer, batch_size)
 
-    def sample_arrays(self, batch_size: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def sample_arrays(self, batch_size: int, include_perfect: bool = False):
         """
         Sample a random batch and return as numpy arrays.
 
@@ -101,9 +104,13 @@ class ReplayBuffer:
 
         Args:
             batch_size: Number of transitions to sample
+            include_perfect: Whether to include perfect states (for PTIE)
 
         Returns:
-            Tuple of (states, actions, move_histories, returns) as numpy arrays
+            If include_perfect=False:
+                Tuple of (states, actions, move_histories, returns)
+            If include_perfect=True:
+                Tuple of (states, actions, move_histories, returns, perfect_states)
         """
         batch = self.sample(batch_size)
 
@@ -116,6 +123,15 @@ class ReplayBuffer:
         if self.normalize:
             std = max(self.return_std, 1e-6)  # Prevent division by zero
             returns = (returns - self.return_mean) / std
+
+        if include_perfect:
+            # Check if perfect states are available
+            if batch[0].perfect_state is not None:
+                perfect_states = np.array([t.perfect_state for t in batch], dtype=np.float32)
+            else:
+                # Return None if perfect states not collected
+                perfect_states = None
+            return states, actions, move_histories, returns, perfect_states
 
         return states, actions, move_histories, returns
 

@@ -9,15 +9,15 @@ TRAINING_CONFIG = {
 
     # Replay buffer
     "buffer_size": 100000,  # Increased for better sample diversity
-    "batch_size": 512,
+    "batch_size": 256,
 
     # Learning
-    "learning_rate": 5e-5,  # Slightly lower for stability
+    "learning_rate": 1e-4,
     "grad_clip": 5.0,
 
     # Exploration - Flexible epsilon schedule
     "epsilon_start": 0.9,
-    "epsilon_end": 0.01,  # Maintain some exploration
+    "epsilon_end": 0.05,  # Maintain some exploration
     "epsilon_schedule": "cosine",  # "cosine" or "exponential"
     "epsilon_warmup_episodes": 1000,  # Fill buffer before learning
     "epsilon_decay": 0.9997,  # Only used if epsilon_schedule == "exponential"
@@ -27,8 +27,8 @@ TRAINING_CONFIG = {
     "tau": 0.005,  # Slower target updates for stability
 
     # Logging and evaluation
-    "eval_freq": 100,  # Episodes between evaluations
-    "eval_games": 100,  # Increased from 50 for tighter confidence intervals
+    "eval_freq": 1000,  # Episodes between evaluations
+    "eval_games": 200,  # Games per evaluation (~±6.4% CI at 30% WR)
     "save_freq": 1000,  # Episodes between checkpoint saves
     "log_freq": 100,  # Episodes between logging
 
@@ -39,12 +39,13 @@ TRAINING_CONFIG = {
     "normalize_returns": True,  # Normalize returns in replay buffer
 
     # Curriculum learning
+    # NOTE: Old checkpoints are incompatible with new 167-dim state encoding
+    # Set checkpoint_opponent_path to None until you have a v2 checkpoint
     "use_curriculum": True,
-    "checkpoint_opponent_path": None,  # Path to frozen opponent model (e.g., "checkpoints/22k.pt")
+    "checkpoint_opponent_path": None,  # Path to frozen opponent model (must use new 167-dim encoding)
+    # Fixed ratio for league training: 60% self-play, 20% greedy, 20% league
     "curriculum_phases": [
         {"progress": 0.0, "self_play": 0.6, "greedy": 0.2, "checkpoint": 0.2},
-        {"progress": 0.33, "self_play": 0.7, "greedy": 0.15, "checkpoint": 0.15},
-        {"progress": 0.66, "self_play": 0.8, "greedy": 0.1, "checkpoint": 0.1},
     ],
 
     # Legacy opponent diversity ratios (used when use_curriculum=False)
@@ -58,6 +59,20 @@ TRAINING_CONFIG = {
     # Checkpointing
     "checkpoint_dir": "checkpoints",
     "save_best": True,
+    "top_k_checkpoints": 5,  # Number of top checkpoints to keep (ranked by greedy win rate)
+
+    # PTIE (Perfect Information Training for Imperfect-Information Games)
+    "use_ptie": True,  # Enable PTIE with critic network
+    "critic_learning_rate": 1e-4,  # Separate LR for critic (can be higher)
+    "critic_weight": 0.5,  # Weight for critic loss in total loss
+    "advantage_weight": 1.0,  # Weight for advantage-based actor loss
+
+    # League training (opponent pool with historical checkpoints)
+    "use_league": False,  # Enable league training (replaces single checkpoint opponent)
+    "league_dir": "checkpoints/league",  # Directory for league checkpoints
+    "league_max_opponents": 20,  # Max opponents to keep in pool
+    "league_snapshot_freq": 2000,  # Episodes between snapshots
+    "league_initial_snapshot": True,  # Take snapshot at start of training
 }
 
 
@@ -85,7 +100,7 @@ def compute_epsilon(episode: int, total_episodes: int,
 
     # NEW: Decay Duration Control
     # Finish decaying at 90% of episodes, hold constant for the last 10%
-    decay_cutoff = 0.9 
+    decay_cutoff = 0.95
     decay_episodes = int(total_episodes * decay_cutoff)
     
     # Calculate progress relative to the CUTOFF, not the total
@@ -98,12 +113,18 @@ def compute_epsilon(episode: int, total_episodes: int,
     else:
         return epsilon_end + (epsilon_start - epsilon_end) * (1 - progress)
 
-# Network configuration (Stage 2 - MLP with enhanced features)
+# Network configuration (Stage 2 - Legitimate state encoding)
 NETWORK_CONFIG = {
-    "state_dim": 149,  # Changed from 143 (added hand_sizes + high_cards)
+    "state_dim": 167,  # Changed from 149 (removed cheating, added graveyard + control)
     "action_dim": 52,
     "hidden_dim": 256,
-    "num_layers": 4,  # Increase from 3 to 4 layers (deeper MLP)
+    "num_layers": 4,  # 4-layer MLP
+}
+
+# Critic network configuration (for PTIE)
+CRITIC_CONFIG = {
+    "perfect_state_dim": 321,  # All hands + game state
+    "hidden_dim": 256,
 }
 
 # Environment configuration
@@ -163,6 +184,7 @@ def get_config():
     return {
         "training": TRAINING_CONFIG,
         "network": NETWORK_CONFIG,
+        "critic": CRITIC_CONFIG,
         "env": ENV_CONFIG,
     }
 
