@@ -10,7 +10,7 @@ from typing import List
 from big2_ai.env import Big2Game, encode_state, encode_action, get_legal_moves
 from big2_ai.models import SimpleNetwork
 from big2_ai.config import NETWORK_CONFIG
-from big2_ai.agents import select_action_greedy_bot
+from big2_ai.agents import select_action_greedy_bot, select_action_rule_based_bot
 
 
 def load_model(model_path: str, device: str):
@@ -59,7 +59,7 @@ def play_game(agents, device: str, verbose: bool = False, track_passes: bool = F
     Play a game with given agents.
 
     Args:
-        agents: List of 4 agents (model, 'random', or 'greedy_bot')
+        agents: List of 4 agents (model, 'random', 'greedy_bot', or 'rule_based_bot')
         device: Device to run model on
         verbose: Whether to print game progress
         track_passes: Whether to track pass statistics
@@ -92,6 +92,8 @@ def play_game(agents, device: str, verbose: bool = False, track_passes: bool = F
             move = random.choice(legal_moves)
         elif agent == "greedy_bot":
             move = select_action_greedy_bot(game, player)
+        elif agent == "rule_based_bot":
+            move = select_action_rule_based_bot(game, player)
         else:
             move = select_action_greedy(game, player, agent, device)
 
@@ -110,6 +112,8 @@ def play_game(agents, device: str, verbose: bool = False, track_passes: bool = F
                 agent_name = "random"
             elif agent == "greedy_bot":
                 agent_name = "greedy_bot"
+            elif agent == "rule_based_bot":
+                agent_name = "rule_based_bot"
             else:
                 agent_name = type(agent).__name__
             print(f"Player {player} ({agent_name}): {move}")

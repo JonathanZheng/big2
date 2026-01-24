@@ -948,10 +948,6 @@ def train(
                     torch.nn.utils.clip_grad_norm_(critic.parameters(), config["grad_clip"])
                     critic_optimizer.step()
 
-                    # Compute advantage for actor training (detach critic to not backprop through it)
-                    with torch.no_grad():
-                        advantages = returns_t - critic.predict_value(perfect_states_t)
-
                 # Forward pass for actor
                 if isinstance(model, LSTMNetwork):
                     q_values = model.predict_q_values(histories_t, states_t, actions_t)

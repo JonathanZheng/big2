@@ -2,6 +2,41 @@
 
 ---
 
+## Training Dynamics & Move Generator Optimization (2025-01-24)
+
+### Training Dynamics Fixes
+
+**File**: `big2_ai/config.py`
+
+- `epsilon_end`: 0.01 → 0.05 (maintain 5% exploration)
+- `epsilon_decay_cutoff`: 0.9 → 0.95 (extend decay period)
+- `learning_rate`: 5e-5 → 1e-4 (2x faster convergence)
+- `batch_size`: 512 → 256 (more frequent updates)
+
+**File**: `big2_ai/training/trainer.py`
+
+- Fixed PTIE bug: actor now uses baseline-subtracted returns (`returns - critic_baseline`)
+- Removed unused advantage computation (was computed but never used)
+
+### Move Generator Optimization
+
+**File**: `big2_ai/env/move_generator.py`
+
+Complete rewrite with rank/suit map optimization:
+
+- **Build maps once**: `build_maps(hand)` creates rank_map and suit_map at start
+- **Direct combo generation**:
+  - Pairs/Triples: O(1) lookup via rank_map instead of scanning hand
+  - Straights: Only check 9 possible consecutive rank sequences (not C(13,5))
+  - Flushes: Only check within same-suit groups (max C(7,5) per suit)
+  - Full houses: Direct 3+2 pattern matching via rank_map
+  - Quads: O(1) lookup for ranks with exactly 4 cards
+- **Conditional generation**: Only generate 5-card combos when `last_move` is 5-card or free turn
+
+**Expected speedup**: 3-10x for move generation (main training bottleneck)
+
+---
+
 ## Evaluation & Checkpoint Improvements (2025-01-23)
 
 ### Changes Made
@@ -381,7 +416,7 @@ CRITIC_CONFIG = {
 
 ---
 
-## File Structure
+## File Structure for big2-web
 
 ```
 big2-web/
