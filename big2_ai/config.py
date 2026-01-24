@@ -48,10 +48,11 @@ TRAINING_CONFIG = {
         {"progress": 0.0, "self_play": 0.6, "greedy": 0.2, "checkpoint": 0.2},
     ],
 
-    # Legacy opponent diversity ratios (used when use_curriculum=False)
-    "self_play_ratio": 0.7,       # 70% pure self-play (all 4 players use model)
-    "greedy_opponent_ratio": 0.2,  # 20% vs 3 greedy opponents (consistent challenge)
-    "random_opponent_ratio": 0.1,  # 10% vs 3 random opponents (diversity)
+    # Opponent diversity ratios (used when use_curriculum=False)
+    "self_play_ratio": 0.6,        # 60% pure self-play (all 4 players use model)
+    "greedy_opponent_ratio": 0.2,  # 20% vs 3 greedy opponents
+    "rule_based_opponent_ratio": 0.2,  # 20% vs 3 rule-based opponents (upgraded bot)
+    "random_opponent_ratio": 0.0,  # 0% random (not used)
 
     # Device
     "device": "cpu",  # Will be set to "mps" if available on M3 Mac
@@ -151,11 +152,12 @@ def get_opponent_mix(episode: int, total_episodes: int, config: dict = None) -> 
         config = TRAINING_CONFIG
 
     if not config.get("use_curriculum", False):
-        # Use legacy fixed ratios
+        # Use fixed ratios (not using curriculum)
+        # Note: When using fixed ratios, we use rule_based_opponent_ratio instead of checkpoint
         return {
-            "self_play": config.get("self_play_ratio", 0.7),
+            "self_play": config.get("self_play_ratio", 0.6),
             "greedy": config.get("greedy_opponent_ratio", 0.2),
-            "checkpoint": config.get("random_opponent_ratio", 0.1),  # Maps to random if no checkpoint
+            "checkpoint": config.get("random_opponent_ratio", 0.0),  # Not used in fixed ratio mode
         }
 
     phases = config.get("curriculum_phases", [

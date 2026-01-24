@@ -18,7 +18,7 @@ from ..models import SimpleNetwork, LSTMNetwork, CriticNetwork
 from ..config import TRAINING_CONFIG, NETWORK_CONFIG, CRITIC_CONFIG, compute_epsilon, get_opponent_mix
 from .buffer import ReplayBuffer
 from .league import League
-from ..agents import select_action_greedy_bot
+from ..agents import select_action_greedy_bot, select_action_rule_based_bot
 
 # Global variable for checkpoint opponent model state dict (loaded once by main process)
 _checkpoint_opponent_state_dict = None
@@ -428,6 +428,89 @@ def worker_play_episode_vs_greedy(args):
     return trajectories, rewards
 
 
+def worker_play_episode_vs_rule_based(args):
+    """
+    Worker function to play one episode with model as player 0 vs rule-based opponents.
+
+    Only collects trajectory for player 0 (the model).
+
+    Args:
+        args: Tuple of (model_state_dict, epsilon, seed, collect_perfect)
+              or (model_state_dict, epsilon, seed) for backwards compatibility
+
+    Returns:
+        (trajectories, rewards) where:
+        - trajectories: List of 4 player trajectories (only player 0 has data)
+        - rewards: List of 4 final rewards
+    """
+    # Handle both old and new argument formats
+    if len(args) == 4:
+        model_state_dict, epsilon, seed, collect_perfect = args
+    else:
+        model_state_dict, epsilon, seed = args
+        collect_perfect = TRAINING_CONFIG.get("use_ptie", False)
+
+    # Set random seed for this worker
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+    # Create model on CPU (workers use CPU only)
+    if NETWORK_CONFIG.get("use_lstm", False):
+        model = LSTMNetwork(**NETWORK_CONFIG)
+    else:
+        model = SimpleNetwork(**NETWORK_CONFIG)
+
+    model.load_state_dict(model_state_dict)
+    model.eval()
+    device = "cpu"
+
+    # Play episode (use margin rewards from config)
+    use_margin = TRAINING_CONFIG.get("use_margin_rewards", True)
+    game = Big2Game(use_margin_rewards=use_margin)
+    trajectories = [[], [], [], []]  # Only player 0 will be populated
+
+    with torch.no_grad():
+        while not game.done:
+            player = game.current_player
+
+            if player == 0:
+                # Model plays as player 0
+                state = encode_state(game, player)
+                move_history = encode_move_history(game, max_moves=16)
+                perfect_state = encode_perfect_state(game) if collect_perfect else None
+                action_idx, legal_moves = select_action(game, player, model, epsilon, device)
+                move = legal_moves[action_idx]
+                action_enc = encode_action(move)
+
+                # Store in trajectory
+                if collect_perfect:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy(),
+                        perfect_state.copy()
+                    ))
+                else:
+                    trajectories[player].append((
+                        state.copy(),
+                        action_enc.copy(),
+                        move_history.copy()
+                    ))
+            else:
+                # Rule-based bot opponents
+                move = select_action_rule_based_bot(game, player)
+
+            # Step game
+            _, _, done, info = game.step(move)
+
+    # Get final rewards
+    rewards = info["all_rewards"]
+
+    return trajectories, rewards
+
+
 def worker_play_episode_vs_random(args):
     """
     Worker function to play one episode with model as player 0 vs random opponents.
@@ -727,7 +810,7 @@ def train(
         has_checkpoint_opponent = True
     elif config.get("use_curriculum", False) and not use_league:
         print("Warning: use_curriculum=True but no checkpoint_opponent_path provided")
-        print("  Checkpoint opponent games will use random opponents instead")
+        print("  Checkpoint opponent games will use rule-based bot instead")
 
     # Initialize league training if enabled
     use_league = use_league or config.get("use_league", False)
@@ -781,11 +864,12 @@ def train(
         if use_league:
             print(f"  Checkpoint workers: using league pool (skill-matched sampling)")
         else:
-            print(f"  Checkpoint opponent: {'loaded' if has_checkpoint_opponent else 'not available (using random)'}")
+            print(f"  Checkpoint opponent: {'loaded' if has_checkpoint_opponent else 'not available (using rule-based bot)'}")
     else:
-        print(f"Opponent mix: {config.get('self_play_ratio', 0.7)*100:.0f}% self-play, "
+        print(f"Opponent mix: {config.get('self_play_ratio', 0.6)*100:.0f}% self-play, "
               f"{config.get('greedy_opponent_ratio', 0.2)*100:.0f}% greedy, "
-              f"{config.get('random_opponent_ratio', 0.1)*100:.0f}% random")
+              f"{config.get('rule_based_opponent_ratio', 0.2)*100:.0f}% rule-based, "
+              f"{config.get('random_opponent_ratio', 0.0)*100:.0f}% random")
     print("=" * 60 + "\n")
 
     # Create worker pool
@@ -818,15 +902,18 @@ def train(
                     self_play_ratio = opponent_mix["self_play"]
                     greedy_ratio = opponent_mix["greedy"]
                     checkpoint_ratio = opponent_mix["checkpoint"]
+                    rule_based_ratio = 0.0  # No rule-based in curriculum mode
                 else:
-                    self_play_ratio = config.get("self_play_ratio", 0.7)
+                    self_play_ratio = config.get("self_play_ratio", 0.6)
                     greedy_ratio = config.get("greedy_opponent_ratio", 0.2)
-                    checkpoint_ratio = config.get("random_opponent_ratio", 0.1)
+                    rule_based_ratio = config.get("rule_based_opponent_ratio", 0.2)
+                    checkpoint_ratio = config.get("random_opponent_ratio", 0.0)
 
                 # Distribute workers
                 n_self_play = max(1, int(num_workers * self_play_ratio))
                 n_greedy = int(num_workers * greedy_ratio)
-                n_checkpoint = num_workers - n_self_play - n_greedy
+                n_rule_based = int(num_workers * rule_based_ratio)
+                n_checkpoint = num_workers - n_self_play - n_greedy - n_rule_based
 
                 # Create worker arguments for each type (include PTIE flag)
                 base_args = lambda: (cpu_model_state_dict, epsilon, random.randint(0, 1000000), use_ptie)
@@ -837,9 +924,13 @@ def train(
                 # Greedy opponent workers
                 greedy_args = [base_args() for _ in range(n_greedy)]
 
-                # Play self-play and greedy episodes
+                # Rule-based opponent workers
+                rule_based_args = [base_args() for _ in range(n_rule_based)]
+
+                # Play self-play, greedy, and rule-based episodes
                 self_play_results = pool.map(worker_play_episode, self_play_args) if n_self_play > 0 else []
                 greedy_results = pool.map(worker_play_episode_vs_greedy, greedy_args) if n_greedy > 0 else []
+                rule_based_results = pool.map(worker_play_episode_vs_rule_based, rule_based_args) if n_rule_based > 0 else []
 
                 # Checkpoint opponent workers (league, single checkpoint, or random fallback)
                 checkpoint_results = []
@@ -862,9 +953,9 @@ def train(
                         ]
                         checkpoint_results = pool.map(worker_play_episode_vs_checkpoint, checkpoint_args)
                     else:
-                        # Fallback to random opponents
-                        random_args = [base_args() for _ in range(n_checkpoint)]
-                        checkpoint_results = pool.map(worker_play_episode_vs_random, random_args)
+                        # Fallback to rule-based opponents (better than random)
+                        fallback_args = [base_args() for _ in range(n_checkpoint)]
+                        checkpoint_results = pool.map(worker_play_episode_vs_rule_based, fallback_args)
 
                 # Add self-play transitions to buffer (all 4 players)
                 for trajectories, rewards in self_play_results:
@@ -880,6 +971,17 @@ def train(
 
                 # Add greedy opponent transitions to buffer (only player 0)
                 for trajectories, rewards in greedy_results:
+                    episode_return = rewards[0]  # Model is player 0
+                    for transition in trajectories[0]:
+                        if use_ptie and len(transition) == 4:
+                            state, action, move_history, perfect_state = transition
+                            buffer.push(state, action, move_history, episode_return, perfect_state)
+                        else:
+                            state, action, move_history = transition
+                            buffer.push(state, action, move_history, episode_return)
+
+                # Add rule-based opponent transitions to buffer (only player 0)
+                for trajectories, rewards in rule_based_results:
                     episode_return = rewards[0]  # Model is player 0
                     for transition in trajectories[0]:
                         if use_ptie and len(transition) == 4:

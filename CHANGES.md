@@ -2,6 +2,49 @@
 
 ---
 
+## Rule-Based Bot Integration & Evaluation Enhancements (2025-01-24)
+
+### Code Cleanup
+
+**File**: `big2_ai/agents/rule_based_bot.py`
+
+- Removed unused imports: `detect_move_type`, `MoveType`
+- These were imported but never used after implementing the 6-phase upgrade from the research paper
+
+### Bot-vs-Bot Evaluation
+
+**File**: `evaluate.py`
+
+- **ADDED** `run_bot_vs_bot_evaluation()` function
+- **ADDED** `--bot-vs-bot` CLI argument accepting 2 bot types
+- Allows testing any combination of greedy_bot vs rule_based_bot
+- Configuration: Bot 1 as player 0 vs 3x Bot 2 (players 1-3)
+
+**Usage**:
+```bash
+# Rule-based bot vs 3 greedy bots
+python3 evaluate.py --bot-vs-bot rule_based_bot greedy_bot --games 200
+
+# Greedy bot vs 3 rule-based bots
+python3 evaluate.py --bot-vs-bot greedy_bot rule_based_bot --games 200
+```
+
+### Training Opponent Distribution Update
+
+**Files**: `big2_ai/training/trainer.py`, `big2_ai/config.py`
+
+- **ADDED** `worker_play_episode_vs_rule_based()` worker function
+- **ADDED** `rule_based_opponent_ratio` configuration parameter
+- **CHANGED** default opponent distribution (when `use_curriculum=False`):
+  - Self-play: 70% → 60%
+  - Greedy opponents: 20% (unchanged)
+  - Rule-based opponents: 0% → 20% (NEW)
+  - Random opponents: 10% → 0% (REMOVED)
+
+**Impact**: Training now uses the upgraded research paper rule-based bot instead of random opponents for more challenging and realistic training experience.
+
+---
+
 ## Training Dynamics & Move Generator Optimization (2025-01-24)
 
 ### Training Dynamics Fixes
@@ -414,52 +457,3 @@ CRITIC_CONFIG = {
 - Shows per-player results sorted by win rate
 - Includes model rankings summary for head-to-head comparison
 
----
-
-## File Structure for big2-web
-
-```
-big2-web/
-├── src/
-│   ├── app/
-│   │   ├── page.tsx
-│   │   ├── layout.tsx
-│   │   ├── auth/
-│   │   │   ├── login/page.tsx
-│   │   │   ├── signup/page.tsx
-│   │   │   └── callback/route.ts
-│   │   ├── play/
-│   │   │   ├── bot/page.tsx
-│   │   │   ├── online/page.tsx
-│   │   │   └── test/page.tsx
-│   │   └── profile/
-│   │       ├── page.tsx
-│   │       └── logout-button.tsx
-│   ├── components/
-│   │   ├── game/
-│   │   │   ├── Card.tsx
-│   │   │   ├── PlayerHand.tsx
-│   │   │   ├── PlayArea.tsx
-│   │   │   ├── MoveControls.tsx
-│   │   │   ├── GameBoard.tsx
-│   │   │   └── index.ts
-│   │   └── ui/
-│   └── lib/
-│       ├── game/
-│       │   ├── types.ts
-│       │   ├── constants.ts
-│       │   ├── game-engine.ts
-│       │   ├── move-detector.ts
-│       │   ├── move-generator.ts
-│       │   ├── greedy-bot.ts
-│       │   └── index.ts
-│       └── supabase/
-│           ├── client.ts
-│           ├── server.ts
-│           ├── middleware.ts
-│           └── types.ts
-├── supabase/
-│   └── migrations/
-│       └── 001_initial.sql
-└── package.json
-```

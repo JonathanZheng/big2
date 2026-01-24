@@ -213,7 +213,75 @@ def run_pass_diagnosis(num_games: int = 100, model_path: str = None):
     print("=" * 60)
 
 
-def run_multi_model_evaluation(model_paths: List[str], num_games: int = 100, verbose: bool = False):
+def run_bot_vs_bot_evaluation(bot1_type: str, bot2_type: str, num_games: int = 100, verbose: bool = False):
+    """
+    Evaluate two bot types against each other.
+
+    Args:
+        bot1_type: First bot type ('greedy_bot' or 'rule_based_bot')
+        bot2_type: Second bot type ('greedy_bot' or 'rule_based_bot')
+        num_games: Number of games to evaluate
+        verbose: Whether to print detailed results
+    """
+    # Setup device (not used for bots, but needed for play_game)
+    if torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    print(f"\nBot vs Bot Evaluation ({num_games} games)")
+    print("=" * 60)
+    print(f"Configuration: 1x {bot1_type} vs 3x {bot2_type}")
+    print()
+
+    # Build agents list: bot1 in position 0, bot2 in positions 1-3
+    agents = [bot1_type, bot2_type, bot2_type, bot2_type]
+
+    # Track wins
+    wins = defaultdict(int)
+
+    for i in range(num_games):
+        winner = play_game(agents, device, verbose=verbose and i == 0)
+        wins[winner] += 1
+
+        if (i + 1) % 20 == 0:
+            print(f"  Progress: {i+1}/{num_games} games")
+
+    print()
+    print("Results:")
+    print("-" * 60)
+
+    # Sort by win rate
+    results = [(player, wins[player]) for player in range(4)]
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    bot1_name = bot1_type.replace("_", " ").title()
+    bot2_name = bot2_type.replace("_", " ").title()
+
+    for player, win_count in results:
+        win_pct = win_count / num_games * 100
+        if player == 0:
+            agent_name = f"Player {player}: {bot1_name}"
+        else:
+            agent_name = f"Player {player}: {bot2_name}"
+
+        print(f"  {agent_name}")
+        print(f"    Wins: {win_count:3d} ({win_pct:5.1f}%)")
+        print()
+
+    # Summary
+    bot1_wins = wins[0]
+    bot2_wins = sum(wins[i] for i in range(1, 4))
+
+    print("Summary:")
+    print("-" * 60)
+    print(f"  {bot1_name}: {bot1_wins:3d} wins ({bot1_wins/num_games*100:5.1f}%)")
+    print(f"  {bot2_name}: {bot2_wins:3d} wins ({bot2_wins/num_games*100:5.1f}%)")
+    print()
+    print("=" * 60)
+
+
+def run_multi_model_evaluation(model_paths: List[str], num_games: int = 100, verbose: bool = False, opponent_type: str = "greedy_bot"):
     """
     Evaluate multiple models against each other.
 
@@ -221,6 +289,7 @@ def run_multi_model_evaluation(model_paths: List[str], num_games: int = 100, ver
         model_paths: List of paths to model checkpoints (1-4 models)
         num_games: Number of games to evaluate
         verbose: Whether to print detailed results
+        opponent_type: Type of bot to fill remaining slots ('greedy_bot' or 'rule_based_bot')
     """
     if len(model_paths) > 4:
         raise ValueError("Maximum 4 models supported")
@@ -244,19 +313,19 @@ def run_multi_model_evaluation(model_paths: List[str], num_games: int = 100, ver
         model_names.append(f"Model {i}: {name} (ep {episode})")
         print(f"  {model_names[-1]}")
 
-    # Fill remaining slots with greedy bots
+    # Fill remaining slots with the selected bot type
     num_models = len(models)
     num_bots = 4 - num_models
     for i in range(num_bots):
-        model_names.append(f"Player {num_models + i}: greedy_bot")
+        model_names.append(f"Player {num_models + i}: {opponent_type}")
         print(f"  {model_names[-1]}")
 
     print()
     print(f"Multi-Model Evaluation ({num_games} games)")
     print("=" * 60)
 
-    # Build agents list
-    agents = models + ["greedy_bot"] * num_bots
+    # Build agents list using the requested opponent type
+    agents = models + [opponent_type] * num_bots
 
     # Track wins
     wins = defaultdict(int)
@@ -278,7 +347,13 @@ def run_multi_model_evaluation(model_paths: List[str], num_games: int = 100, ver
 
     for player, win_count in results:
         win_pct = win_count / num_games * 100
-        agent_type = "Model" if player < num_models else "Greedy Bot"
+        # Determine label based on player index
+        if player < num_models:
+            agent_type = "Model"
+        else:
+            # Format "rule_based_bot" -> "Rule Based Bot"
+            agent_type = opponent_type.replace("_", " ").title()
+            
         name = model_names[player]
         print(f"  {name}")
         print(f"    Wins: {win_count:3d} ({win_pct:5.1f}%)")
@@ -352,7 +427,7 @@ def evaluate(model_path: str, num_games: int = 100, verbose: bool = False):
     print(f"    Player 3:     {wins[3]:3d} ({wins[3]/num_games*100:5.1f}%)")
 
     # Evaluate against greedy bot opponents
-    print("\n2. Model vs 3 Greedy Bot Opponents")
+    print("\n2. Model vs Bot Opponents")
     print("-" * 60)
 
     wins_greedy = defaultdict(int)
@@ -423,16 +498,35 @@ def main():
         nargs="+",
         help="Multiple model checkpoints to evaluate against each other (1-4 models, rest are greedy bots)"
     )
+    parser.add_argument(
+        "--rule-based",
+        action="store_true",
+        help="Use rule_based_bot instead of greedy_bot for filler opponents in multi-model evaluation"
+    )
+    parser.add_argument(
+        "--bot-vs-bot",
+        type=str,
+        nargs=2,
+        metavar=("BOT1", "BOT2"),
+        help="Evaluate BOT1 (player 0) vs 3x BOT2 (players 1-3). Options: greedy_bot, rule_based_bot"
+    )
 
     args = parser.parse_args()
 
-    if args.models:
-        run_multi_model_evaluation(args.models, args.games, args.verbose)
+    if args.bot_vs_bot:
+        bot1, bot2 = args.bot_vs_bot
+        valid_bots = ["greedy_bot", "rule_based_bot"]
+        if bot1 not in valid_bots or bot2 not in valid_bots:
+            parser.error(f"Invalid bot type. Must be one of: {', '.join(valid_bots)}")
+        run_bot_vs_bot_evaluation(bot1, bot2, args.games, args.verbose)
+    elif args.models:
+        opponent = "rule_based_bot" if args.rule_based else "greedy_bot"
+        run_multi_model_evaluation(args.models, args.games, args.verbose, opponent_type=opponent)
     elif args.pass_diagnosis:
         run_pass_diagnosis(args.games, args.checkpoint)
     else:
         if args.checkpoint is None:
-            parser.error("checkpoint is required unless --pass_diagnosis or --models is specified")
+            parser.error("checkpoint is required unless --pass_diagnosis, --models, or --bot-vs-bot is specified")
         evaluate(args.checkpoint, args.games, args.verbose)
 
 

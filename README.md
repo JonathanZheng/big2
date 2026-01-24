@@ -104,20 +104,64 @@ big2/
 ├── train.py          # Training script
 ├── evaluate.py       # Evaluation script
 ├── CHANGES.md        # Change log
-└── big2_ai/
-    ├── env/              # Game environment
-    │   ├── game.py       # Big 2 rules & state management
-    │   ├── move_generator.py   # Legal move generation
-    │   ├── move_detector.py    # Move type classification
-    │   └── encoding.py         # State/action encoding (167 dims)
-    ├── models/
-    │   ├── simple_network.py   # Dense Q-network (~198K params)
-    │   └── lstm_network.py     # LSTM variant for history
-    ├── agents/
-    │   └── greedy_bot.py       # Rule-based greedy opponent
-    └── training/
-        ├── buffer.py     # Replay buffer with normalization
-        └── trainer.py    # Training loop with parallel workers
+├── big2_ai/
+│   ├── env/              # Game environment
+│   │   ├── game.py       # Big 2 rules & state management
+│   │   ├── move_generator.py   # Legal move generation
+│   │   ├── move_detector.py    # Move type classification
+│   │   └── encoding.py         # State/action encoding (167 dims)
+│   ├── models/
+│   │   ├── simple_network.py   # Dense Q-network (~198K params)
+│   │   ├── lstm_network.py     # LSTM variant for history
+│   │   └── critic_network.py   # Critic network for PTIE
+│   ├── agents/
+│   │   ├── greedy_bot.py       # Rule-based greedy opponent
+│   │   └── rule_based_bot.py   # Research paper rule-based bot
+│   └── training/
+│       ├── buffer.py     # Replay buffer with normalization
+│       ├── trainer.py    # Training loop with parallel workers
+│       └── league.py     # League training opponent pool
+└── big2-web/
+    ├── src/
+    │   ├── app/
+    │   │   ├── page.tsx
+    │   │   ├── layout.tsx
+    │   │   ├── auth/           # Authentication pages
+    │   │   │   ├── login/page.tsx
+    │   │   │   ├── signup/page.tsx
+    │   │   │   └── callback/route.ts
+    │   │   ├── play/           # Game modes
+    │   │   │   ├── bot/page.tsx
+    │   │   │   ├── online/page.tsx
+    │   │   │   └── test/page.tsx
+    │   │   └── profile/
+    │   │       ├── page.tsx
+    │   │       └── logout-button.tsx
+    │   ├── components/
+    │   │   ├── game/           # Game UI components
+    │   │   │   ├── Card.tsx
+    │   │   │   ├── PlayerHand.tsx
+    │   │   │   ├── PlayArea.tsx
+    │   │   │   ├── MoveControls.tsx
+    │   │   │   └── GameBoard.tsx
+    │   │   └── ui/
+    │   └── lib/
+    │       ├── game/           # Game engine (TypeScript port)
+    │       │   ├── types.ts
+    │       │   ├── constants.ts
+    │       │   ├── game-engine.ts
+    │       │   ├── move-detector.ts
+    │       │   ├── move-generator.ts
+    │       │   └── greedy-bot.ts
+    │       └── supabase/       # Supabase integration
+    │           ├── client.ts
+    │           ├── server.ts
+    │           ├── middleware.ts
+    │           └── types.ts
+    ├── supabase/
+    │   └── migrations/
+    │       └── 001_initial.sql
+    └── package.json
 ```
 
 ### State Encoding (167 dims)
