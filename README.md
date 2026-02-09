@@ -1,13 +1,10 @@
 # Big 2 AI - Deep Monte Carlo Training
 
-A Deep Monte Carlo implementation for learning to play Big 2 (a popular 4-player card game).
-
-**Stage**: Stage 2 - Legitimate State Encoding
-**Status**: Refactored to remove hidden information leakage
+A Deep Monte Carlo implementation for learning to play Big 2 (a popular 4-player card game), with a full-featured web application.
 
 ## Quick Start
 
-### Installation
+### Installation (Python AI Training)
 
 ```bash
 # Install dependencies
@@ -83,6 +80,38 @@ python play.py checkpoints/big2_model_best.pt --seed 42
 - Examples: `3d`, `10h`, `ah`, `2s`
 - Case-insensitive
 
+## Web Application
+
+The web app provides a browser-based interface to play Big 2 with multiple game modes.
+
+### Running the Web App
+
+```bash
+cd big2-web
+
+# Install dependencies
+npm install
+
+# Run development server
+npm run dev
+```
+
+The app will be available at `http://localhost:3000`.
+
+### Web App Features
+
+- **Play vs Bots** - Single player against 3 AI opponents with ELO tracking
+- **Online Multiplayer** - Real-time 4-player games with room codes or matchmaking
+- **Test Mode** - AI move suggestions for analyzing physical card games
+- **User Profiles** - Stats tracking (games played, wins, ELO rating, streaks)
+- **Authentication** - Email/password login via Supabase
+
+### Tech Stack
+
+- **Frontend**: Next.js 16, React 19, Tailwind CSS
+- **Backend**: Supabase (PostgreSQL, Auth, Realtime)
+- **Game Engine**: TypeScript port of Python implementation
+
 ## Architecture Overview
 
 ### Current Features
@@ -127,40 +156,19 @@ big2/
     │   │   ├── page.tsx
     │   │   ├── layout.tsx
     │   │   ├── auth/           # Authentication pages
-    │   │   │   ├── login/page.tsx
-    │   │   │   ├── signup/page.tsx
-    │   │   │   └── callback/route.ts
-    │   │   ├── play/           # Game modes
-    │   │   │   ├── bot/page.tsx
-    │   │   │   ├── online/page.tsx
-    │   │   │   └── test/page.tsx
-    │   │   └── profile/
-    │   │       ├── page.tsx
-    │   │       └── logout-button.tsx
+    │   │   ├── play/           # Game modes (bot, online, test)
+    │   │   └── profile/        # User profile & stats
     │   ├── components/
     │   │   ├── game/           # Game UI components
-    │   │   │   ├── Card.tsx
-    │   │   │   ├── PlayerHand.tsx
-    │   │   │   ├── PlayArea.tsx
-    │   │   │   ├── MoveControls.tsx
-    │   │   │   └── GameBoard.tsx
-    │   │   └── ui/
+    │   │   ├── multiplayer/    # Online multiplayer components
+    │   │   ├── test-mode/      # Test mode components
+    │   │   └── ui/             # Shared UI components
+    │   ├── hooks/              # React hooks (useMultiplayerGame)
     │   └── lib/
     │       ├── game/           # Game engine (TypeScript port)
-    │       │   ├── types.ts
-    │       │   ├── constants.ts
-    │       │   ├── game-engine.ts
-    │       │   ├── move-detector.ts
-    │       │   ├── move-generator.ts
-    │       │   └── greedy-bot.ts
     │       └── supabase/       # Supabase integration
-    │           ├── client.ts
-    │           ├── server.ts
-    │           ├── middleware.ts
-    │           └── types.ts
     ├── supabase/
-    │   └── migrations/
-    │       └── 001_initial.sql
+    │   └── migrations/         # Database migrations
     └── package.json
 ```
 
@@ -218,9 +226,9 @@ Key hyperparameters (see `big2_ai/config.py`):
 |-----------|-------|-------------|
 | Episodes | 50,000 | Total training episodes |
 | Buffer size | 100,000 | Replay buffer capacity |
-| Batch size | 512 | Training batch size |
-| Learning rate | 5e-5 | Adam optimizer LR |
-| Epsilon | 0.9 → 0.01 | Cosine annealing exploration |
+| Batch size | 256 | Training batch size |
+| Learning rate | 1e-4 | Adam optimizer LR |
+| Epsilon | 0.9 → 0.05 | Cosine annealing exploration |
 | Warmup | 1,000 | Episodes before epsilon decay |
 | Target update | Every 100 eps | Soft update with tau=0.005 |
 | Gradient clip | 5.0 | Max gradient norm |
@@ -228,22 +236,13 @@ Key hyperparameters (see `big2_ai/config.py`):
 
 ### Curriculum Learning
 
-When enabled, opponent mix changes over training:
+Fixed opponent distribution for training:
 
-| Progress | Self-Play | Greedy | Checkpoint |
-|----------|-----------|--------|------------|
-| 0% | 60% | 20% | 20% |
-| 33% | 70% | 15% | 15% |
-| 66% | 80% | 10% | 10% |
-
-## Performance
-
-Optimized for Apple Silicon (M3):
-
-- **Training speed**: ~12-18 episodes/second (6 workers)
-- **Full training**: 50K episodes in 1-2 hours
-- **Memory usage**: <2GB RAM
-- **Acceleration**: Main model uses MPS, workers use CPU
+| Opponent Type | Ratio |
+|---------------|-------|
+| Self-Play | 60% |
+| Greedy Bot | 20% |
+| Rule-Based Bot | 20% |
 
 ## Big 2 Rules
 
@@ -257,23 +256,6 @@ The game follows standard Big 2 rules:
 - Game ends when any player runs out of cards
 - Rank order: 3 < 4 < ... < K < A < 2
 - Suit order: Diamonds < Clubs < Hearts < Spades
-
-## Roadmap
-
-### Completed
-- [x] Deep Monte Carlo training pipeline
-- [x] Parallel self-play with configurable workers
-- [x] Curriculum learning with opponent mix
-- [x] LSTM variant for history encoding
-- [x] Legitimate state encoding (no cheating)
-- [x] Graveyard tracking
-- [x] Control/turn state
-
-### Planned
-- [ ] PTIE (Perfect Information Training) with oracle critic
-- [ ] League training with historical opponent pool
-- [ ] ResNet architecture option
-- [ ] Supervised learning baseline from human data
 
 ## License
 
