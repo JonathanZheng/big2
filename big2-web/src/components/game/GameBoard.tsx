@@ -20,11 +20,12 @@ interface GameBoardProps {
   humanPlayer?: PlayerIndex;
   botDelay?: number;
   onGameEnd?: (winner: PlayerIndex) => void;
+  onNewGame?: () => void;
 }
 
 type GamePhase = 'playing' | 'ended';
 
-export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd }: GameBoardProps) {
+export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd, onNewGame }: GameBoardProps) {
   const [game, setGame] = useState<Big2Game | null>(null);
   const [selectedCards, setSelectedCards] = useState<number[]>([]);
   const [gamePhase, setGamePhase] = useState<GamePhase>('playing');
@@ -126,7 +127,8 @@ export function GameBoard({ humanPlayer = 0, botDelay = 1000, onGameEnd }: GameB
     setGamePhase('playing');
     setIsProcessingBotTurn(false);
     setGameVersion(0);
-  }, []);
+    onNewGame?.();
+  }, [onNewGame]);
 
   if (!game) {
     return (

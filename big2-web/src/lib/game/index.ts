@@ -19,3 +19,7 @@ export { getLegalMoves } from './move-generator';
 
 // Greedy Bot
 export { selectActionGreedyBot } from './greedy-bot';
+
+// Test Mode
+export { analyzeSituation } from './test-mode';
+export type { TestModeState, TestModeMove, MoveSuggestion } from './test-mode';
