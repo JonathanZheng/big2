@@ -10,7 +10,7 @@ from typing import List
 from big2_ai.env import Big2Game, encode_state, encode_action, get_legal_moves
 from big2_ai.models import SimpleNetwork
 from big2_ai.config import NETWORK_CONFIG
-from big2_ai.agents import select_action_greedy_bot, select_action_rule_based_bot
+from big2_ai.agents import select_action_greedy_bot, select_action_rule_based_bot, select_action_smart_bot
 
 
 def load_model(model_path: str, device: str):
@@ -94,6 +94,8 @@ def play_game(agents, device: str, verbose: bool = False, track_passes: bool = F
             move = select_action_greedy_bot(game, player)
         elif agent == "rule_based_bot":
             move = select_action_rule_based_bot(game, player)
+        elif agent == "smart_bot":
+            move = select_action_smart_bot(game, player)
         else:
             move = select_action_greedy(game, player, agent, device)
 
@@ -114,6 +116,8 @@ def play_game(agents, device: str, verbose: bool = False, track_passes: bool = F
                 agent_name = "greedy_bot"
             elif agent == "rule_based_bot":
                 agent_name = "rule_based_bot"
+            elif agent == "smart_bot":
+                agent_name = "smart_bot"
             else:
                 agent_name = type(agent).__name__
             print(f"Player {player} ({agent_name}): {move}")
@@ -508,7 +512,7 @@ def main():
         type=str,
         nargs=2,
         metavar=("BOT1", "BOT2"),
-        help="Evaluate BOT1 (player 0) vs 3x BOT2 (players 1-3). Options: greedy_bot, rule_based_bot"
+        help="Evaluate BOT1 (player 0) vs 3x BOT2 (players 1-3). Options: greedy_bot, rule_based_bot, smart_bot"
     )
 
     args = parser.parse_args()

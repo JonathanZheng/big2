@@ -4,7 +4,7 @@ from typing import List, Dict, Tuple
 from collections import defaultdict
 
 from .game import Move, card_rank, card_suit
-from .move_detector import detect_move_type, can_beat, MoveType
+from .move_detector import detect_move_type, can_beat, is_straight, MoveType, STRAIGHT_RANKS
 
 
 def build_maps(hand: List[int]) -> Tuple[Dict[int, List[int]], Dict[int, List[int]]]:
@@ -99,22 +99,17 @@ def generate_triples(rank_map: Dict[int, List[int]], player: int) -> List[Move]:
 
 def generate_straights(hand: List[int], rank_map: Dict[int, List[int]], player: int) -> List[Move]:
     """
-    Generate all straight moves (5 consecutive ranks).
+    Generate all straight moves (rank sets in STRAIGHT_RANKS).
 
-    Optimized: Only check consecutive rank sequences instead of all C(n,5) combinations.
+    Optimized: Only check straight rank sets instead of all C(n,5) combinations.
     """
     moves = []
 
-    # Get sorted unique ranks in hand
-    ranks_present = sorted(rank_map.keys())
-
-    # Find all possible 5-consecutive-rank sequences
-    for start_rank in range(9):  # 0-8 (3-J as starting ranks, ending at 7-2)
-        # Check if we have cards at all 5 consecutive ranks
-        consecutive_ranks = [start_rank + i for i in range(5)]
-        if all(r in rank_map for r in consecutive_ranks):
+    for straight_ranks in STRAIGHT_RANKS:
+        # Check if we have cards at all 5 ranks
+        if all(r in rank_map for r in straight_ranks):
             # Generate all combinations of cards from these ranks
-            _generate_straight_combos(rank_map, consecutive_ranks, player, moves)
+            _generate_straight_combos(rank_map, list(straight_ranks), player, moves)
 
     return moves
 
@@ -170,9 +165,7 @@ def _generate_flush_combos(cards: List[int], player: int, moves: List[Move]):
                     for m in range(l + 1, n):
                         combo = [cards[i], cards[j], cards[k], cards[l], cards[m]]
                         # Check it's not a straight
-                        ranks = sorted(card_rank(c) for c in combo)
-                        is_straight = all(ranks[x+1] == ranks[x] + 1 for x in range(4))
-                        if not is_straight:
+                        if not is_straight([card_rank(c) for c in combo]):
                             moves.append(Move(combo, player))
 
 
@@ -191,12 +184,11 @@ def generate_straight_flushes(suit_map: Dict[int, List[int]], player: int) -> Li
             for card in cards:
                 suit_rank_map[card_rank(card)].append(card)
 
-            # Find consecutive rank sequences within this suit
-            for start_rank in range(9):
-                consecutive_ranks = [start_rank + i for i in range(5)]
-                if all(r in suit_rank_map for r in consecutive_ranks):
+            # Find straight rank sets within this suit
+            for straight_ranks in STRAIGHT_RANKS:
+                if all(r in suit_rank_map for r in straight_ranks):
                     # All ranks present in this suit - it's a straight flush
-                    combo = [suit_rank_map[r][0] for r in consecutive_ranks]
+                    combo = [suit_rank_map[r][0] for r in straight_ranks]
                     moves.append(Move(combo, player))
 
     return moves
@@ -318,10 +310,8 @@ def generate_first_moves(hand: List[int], player: int,
     # 5-card combos containing 3♦
     if len(hand) >= 5:
         # Straights containing 3♦ (rank 0)
-        # 3♦ can only be in straights starting at rank 0 (3-4-5-6-7)
-        if all(r in rank_map for r in range(5)):
-            for combo in _first_move_straights(rank_map, player):
-                moves.append(combo)
+        for combo in _first_move_straights(rank_map, player):
+            moves.append(combo)
 
         # Flushes containing 3♦ (must be diamond suit = 0)
         if 0 in suit_map and len(suit_map[0]) >= 5:
@@ -347,22 +337,24 @@ def generate_first_moves(hand: List[int], player: int,
 def _first_move_straights(rank_map: Dict[int, List[int]], player: int) -> List[Move]:
     """Generate straights containing 3♦ (card 0)."""
     moves = []
-    # Only straight starting at 3 (rank 0): 3-4-5-6-7
-    ranks = [0, 1, 2, 3, 4]
-    cards_per_rank = [rank_map[r] for r in ranks]
+    # Only straights containing rank 0 (3): 3-4-5-6-7, 2-3-4-5-6, A-2-3-4-5
+    for ranks in STRAIGHT_RANKS:
+        if 0 not in ranks or not all(r in rank_map for r in ranks):
+            continue
+        cards_per_rank = [rank_map[r] for r in ranks]
 
-    def generate(idx: int, current: List[int], has_3d: bool):
-        if idx == 5:
-            if has_3d:
-                suits = [card_suit(c) for c in current]
-                if len(set(suits)) > 1:  # Not straight flush
-                    moves.append(Move(current.copy(), player))
-            return
+        def generate(idx: int, current: List[int], has_3d: bool):
+            if idx == 5:
+                if has_3d:
+                    suits = [card_suit(c) for c in current]
+                    if len(set(suits)) > 1:  # Not straight flush
+                        moves.append(Move(current.copy(), player))
+                return
 
-        for card in cards_per_rank[idx]:
-            generate(idx + 1, current + [card], has_3d or card == 0)
+            for card in cards_per_rank[idx]:
+                generate(idx + 1, current + [card], has_3d or card == 0)
 
-    generate(0, [], False)
+        generate(0, [], False)
     return moves
 
 
@@ -384,9 +376,7 @@ def _first_move_flushes(diamond_cards: List[int], player: int) -> List[Move]:
                 for l in range(k + 1, len(other_cards)):
                     combo = [0, other_cards[i], other_cards[j], other_cards[k], other_cards[l]]
                     # Check it's not a straight
-                    ranks = sorted(card_rank(c) for c in combo)
-                    is_straight = all(ranks[x+1] == ranks[x] + 1 for x in range(4))
-                    if not is_straight:
+                    if not is_straight([card_rank(c) for c in combo]):
                         moves.append(Move(combo, player))
 
     return moves
@@ -401,10 +391,10 @@ def _first_move_straight_flushes(diamond_cards: List[int], player: int) -> List[
     for card in diamond_cards:
         rank_map[card_rank(card)].append(card)
 
-    # Only straight 3-4-5-6-7 in diamonds
-    if all(r in rank_map for r in range(5)):
-        combo = [rank_map[r][0] for r in range(5)]
-        if 0 in combo:  # 3♦ must be included
+    # Only diamond straights containing the 3: 3-4-5-6-7, 2-3-4-5-6, A-2-3-4-5
+    for ranks in STRAIGHT_RANKS:
+        if 0 in ranks and all(r in rank_map for r in ranks):
+            combo = [rank_map[r][0] for r in ranks]
             moves.append(Move(combo, player))
 
     return moves

@@ -29,18 +29,25 @@ def card_suit(card: int) -> int:
     return card % 4
 
 
-def is_straight(ranks: List[int]) -> bool:
-    """Check if ranks form a straight (5 consecutive cards)."""
+# Straight rank sets, lowest to highest (house rules):
+# 3-4-5-6-7 < ... < 10-J-Q-K-A < J-Q-K-A-2 < 2-3-4-5-6 < A-2-3-4-5
+STRAIGHT_RANKS = [tuple(range(low, low + 5)) for low in range(9)] + [
+    (0, 1, 2, 3, 12),   # 2-3-4-5-6
+    (0, 1, 2, 11, 12),  # A-2-3-4-5
+]
+_STRAIGHT_KEYS = {frozenset(r): i for i, r in enumerate(STRAIGHT_RANKS)}
+
+
+def straight_key(ranks: List[int]) -> int:
+    """Position of these ranks in STRAIGHT_RANKS, or -1 if not a straight."""
     if len(ranks) != 5:
-        return False
+        return -1
+    return _STRAIGHT_KEYS.get(frozenset(ranks), -1)
 
-    sorted_ranks = sorted(ranks)
 
-    # Check normal straight
-    for i in range(4):
-        if sorted_ranks[i + 1] != sorted_ranks[i] + 1:
-            return False
-    return True
+def is_straight(ranks: List[int]) -> bool:
+    """Check if ranks form a straight under the house rules."""
+    return straight_key(ranks) >= 0
 
 
 def is_flush(suits: List[int]) -> bool:
@@ -92,23 +99,14 @@ def detect_move_type(cards: List[int]) -> MoveType:
         elif is_fl:
             return MoveType.FLUSH
         else:
-            # Check for full house (3+2)
+            # Check for full house (3+2) or quad with kicker (4+1)
             if len(rank_counts) == 2:
                 counts = sorted(rank_counts.values())
                 if counts == [2, 3]:
                     return MoveType.FULL_HOUSE
+                if counts == [1, 4]:
+                    return MoveType.QUAD_WITH_KICKER
             return MoveType.INVALID
-
-    if len(cards) == 5:
-        # Already handled above
-        return MoveType.INVALID
-
-    # Check for quad with kicker (4+1)
-    if len(cards) == 5:
-        if len(rank_counts) == 2:
-            counts = sorted(rank_counts.values())
-            if counts == [1, 4]:
-                return MoveType.QUAD_WITH_KICKER
 
     return MoveType.INVALID
 
@@ -133,11 +131,10 @@ def get_move_value(cards: List[int], move_type: MoveType) -> Tuple[int, int]:
         # Use the rank and highest suit
         return (ranks[0], max(suits))
 
-    if move_type == MoveType.STRAIGHT:
-        # Highest card in straight
-        max_rank = max(ranks)
+    if move_type in [MoveType.STRAIGHT, MoveType.STRAIGHT_FLUSH]:
+        # Straight order, then suit of the highest card (the 2 when present)
         max_card = max(cards)
-        return (max_rank, card_suit(max_card))
+        return (straight_key(ranks), card_suit(max_card))
 
     if move_type == MoveType.FLUSH:
         # Compare by highest card
@@ -159,11 +156,6 @@ def get_move_value(cards: List[int], move_type: MoveType) -> Tuple[int, int]:
         quad_cards = [c for c in cards if card_rank(c) == quad_rank]
         max_suit = max(card_suit(c) for c in quad_cards)
         return (quad_rank, max_suit)
-
-    if move_type == MoveType.STRAIGHT_FLUSH:
-        # Highest card
-        max_card = max(cards)
-        return (card_rank(max_card), card_suit(max_card))
 
     return (-1, -1)
 
